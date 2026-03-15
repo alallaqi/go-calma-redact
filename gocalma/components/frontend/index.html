@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: transparent; }
+
+    #viewer {
+        position: relative;
+        width: 100%;
+        line-height: 0;
+    }
+
+    #viewer img {
+        width: 100%;
+        display: block;
+        border-radius: 6px;
+    }
+
+    /* -- word overlay boxes -- */
+    .wb {
+        position: absolute;
+        cursor: pointer;
+        border-radius: 2px;
+        transition: background 0.1s ease, outline 0.1s ease;
+    }
+
+    /* default: invisible */
+    .wb:not(.on) {
+        background: transparent;
+    }
+
+    /* hover on clean word: subtle blue */
+    .wb:not(.on):hover {
+        background: rgba(61, 90, 128, 0.12);
+        outline: 1px solid rgba(61, 90, 128, 0.35);
+    }
+
+    /* redacted word: light navy tint */
+    .wb.on {
+        background: rgba(43, 58, 78, 0.25);
+        outline: 1.5px solid rgba(43, 58, 78, 0.5);
+    }
+
+    /* hover on redacted word: red tint (signals un-redact) */
+    .wb.on:hover {
+        background: rgba(200, 50, 50, 0.2);
+        outline: 1.5px solid rgba(200, 50, 50, 0.5);
+    }
+
+    /* hint bar */
+    #hint {
+        position: absolute;
+        bottom: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(30, 45, 61, 0.85);
+        color: #fff;
+        font-family: 'Inter', system-ui, sans-serif;
+        font-size: 11px;
+        padding: 4px 12px;
+        border-radius: 20px;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        white-space: nowrap;
+        z-index: 10;
+    }
+    #viewer:hover #hint { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="viewer">
+    <img id="page-img" />
+    <div id="hint">Double-click any word to toggle redaction</div>
+</div>
+
+<script>
+/* -- Resolve the trusted parent origin once at load time.
+      document.referrer gives the exact origin of the embedding Streamlit page
+      without hard-coding any URL.  Falls back to same-origin if unavailable. -- */
+var _parentOrigin = (function () {
+    try {
+        if (document.referrer) return new URL(document.referrer).origin;
+    } catch (_) {}
+    return window.location.origin;
+}());
+
+/* -- Streamlit communication helpers -- */
+function stMsg(type, data) {
+    window.parent.postMessage(
+        Object.assign({isStreamlitMessage: true, type: type}, data || {}),
+        _parentOrigin
+    );
+}
+function setValue(v) { stMsg("streamlit:setComponentValue", {value: v}); }
+function setHeight(h) { stMsg("streamlit:setFrameHeight", {height: h || document.body.scrollHeight}); }
+
+/* -- Render logic -- */
+function render(args) {
+    var viewer = document.getElementById("viewer");
+    var img = document.getElementById("page-img");
+
+    /* Remove old word boxes (keep img + hint) */
+    var old = viewer.querySelectorAll(".wb");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+
+    img.src = "data:image/png;base64," + args.image_base64;
+
+    var redSet = {};
+    (args.redacted_indices || []).forEach(function(idx) { redSet[idx] = true; });
+
+    (args.words || []).forEach(function(w) {
+        var d = document.createElement("div");
+        d.className = "wb" + (redSet[w.index] ? " on" : "");
+        d.style.left   = w.x_pct + "%";
+        d.style.top    = w.y_pct + "%";
+        d.style.width  = w.w_pct + "%";
+        d.style.height = w.h_pct + "%";
+        /* title is a plain tooltip attribute — no HTML parsing, safe to set
+           from document content without sanitisation.                       */
+        d.title = redSet[w.index]
+            ? '"' + w.text + '" \u2014 double-click to un-redact'
+            : '"' + w.text + '" \u2014 double-click to redact';
+
+        d.addEventListener("dblclick", function(e) {
+            e.preventDefault();
+            setValue({action: "toggle", word_index: w.index, text: w.text, ts: Date.now()});
+        });
+
+        viewer.appendChild(d);
+    });
+
+    function onImgReady() { setHeight(viewer.offsetHeight); }
+    if (img.complete && img.naturalWidth > 0) onImgReady();
+    else img.onload = onImgReady;
+}
+
+/* -- Streamlit lifecycle -- */
+window.addEventListener("message", function(event) {
+    /* Ignore messages from untrusted origins. */
+    if (event.origin !== _parentOrigin) return;
+    if (event.data.type === "streamlit:render") render(event.data.args);
+});
+stMsg("streamlit:componentReady", {apiVersion: 1});
+</script>
+</body>
+</html>

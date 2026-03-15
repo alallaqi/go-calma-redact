@@ -1,0 +1,49 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Streamlit
+.streamlit/
+
+# Large local model weights — download separately, never commit
+mistral_models/
+phi_models/
+qwen_models/
+*.safetensors
+*.bin
+*.gguf
+
+# Benchmark output files (results data — script is kept)
+benchmarks/results*.json
+benchmarks/results*.xlsx
+benchmarks/results_ocr*.json
+benchmarks/results_ocr*.xlsx
+# Excel temp/lock files
+~$*
+
+# Redacted output and key files
+*.gocalma
+redacted*.pdf
+
+# Test PDFs / uploads
+*.pdf
+!tests/**/*.pdf
+
+# Surya model cache
+~/.cache/surya/
+
+# Misc
+*.log
+.env
+
+.claude/
