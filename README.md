@@ -60,6 +60,8 @@ streamlit run app.py
 
 The app opens at **http://localhost:8501**.
 
+![GoCalma Redact — upload and side-by-side preview](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.32.png)
+
 > **First run:** The Surya OCR models (~1 GB) download automatically on first use and are cached locally. Subsequent runs are instant. If you enable an LLM backend, model weights (3–15 GB depending on the model) also download on first use.
 
 > **Before redacting:** Always review the detected entities in the interactive table. Verify that all sensitive information has been found — especially on scanned documents — before generating the redacted PDF. Double-click any word directly on the document to add missed items manually.
@@ -154,6 +156,8 @@ ollama pull llama3.2     # or phi3:mini, qwen2.5:1.5b
 
 Swiss-specific recognizers fire for all supported languages (de / fr / it / en).
 
+![Detected entities table](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.46.png)
+
 ## NER Model Backends
 
 | Model | Languages | Speed | Best for |
@@ -170,6 +174,8 @@ Swiss-specific recognizers fire for all supported languages (de / fr / it / en).
 
 Only installed backends appear in the dropdown. Uninstalled models show "(not installed)".
 
+![NER model selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.20.png)
+
 ## De-identification Approaches
 
 | Approach | Visual result | Reversible |
@@ -183,6 +189,10 @@ Only installed backends appear in the dropdown. Uninstalled models show "(not in
 | **synthesize** | "John Doe", "redacted@example.com" | Yes |
 
 All approaches store the original text in the encrypted key file.
+
+![De-identification approach selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.11.png)
+
+![Reverse redaction and passphrase protection](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.01.png)
 
 ## OCR Pipeline
 
@@ -223,6 +233,8 @@ sequenceDiagram
 ```
 
 The LLM prompt is tuned for Swiss documents: it explicitly lists AHV numbers, Zugangscodes, PIDs, and Swiss reference formats, and defaults to `confirmed` when uncertain to minimize missed PII.
+
+![LLM detector selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.28.png)
 
 ## Security Model
 
