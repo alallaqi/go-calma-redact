@@ -60,6 +60,10 @@ streamlit run app.py
 
 The app opens at **http://localhost:8501**.
 
+> **First run:** The Surya OCR models (~1 GB) download automatically on first use and are cached locally. Subsequent runs are instant. If you enable an LLM backend, model weights (3–15 GB depending on the model) also download on first use.
+
+> **Before redacting:** Always review the detected entities in the interactive table. Verify that all sensitive information has been found — especially on scanned documents — before generating the redacted PDF. Double-click any word directly on the document to add missed items manually.
+
 ## Full Installation Guide
 
 ### Core (required)
@@ -313,6 +317,12 @@ python benchmarks/run_benchmark.py /path/to/pdfs \
 - SwissBERT is the right choice for German/Swiss documents after the XMod `set_default_language` fix
 - obi/deid_roberta_i2b2 has a 169s cold start — unusable in interactive contexts
 - For Swiss tax forms and government letters, `de_core_news_lg` + SwissBERT + Swiss pattern recognizers gives the best combined coverage
+
+## Roadmap
+
+- **Faster LLM verification** — evaluate smaller/quantized models (Qwen2.5-0.5B, SmolLM2) to reduce per-page verification time below 3s while maintaining Swiss PII recall
+- **ML-based entity ranking** — train a lightweight classifier on Swiss document patterns to score and prioritise detected entities, reducing false positives without an LLM
+- **Batch processing** — redact multiple PDFs in one run with a shared output folder
 
 ## License
 

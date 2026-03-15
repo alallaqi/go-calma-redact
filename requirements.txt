@@ -19,7 +19,7 @@ Pillow>=10.0.0
 
 # OCR engines
 # Surya (recommended — transformer-based, language-agnostic, pure pip)
-"surya-ocr<0.5"           # 0.5+ requires Python 3.10+
+surya-ocr                 # transformer-based OCR, language-agnostic
 # Tesseract fallback (requires system binary):
 #   brew install tesseract tesseract-lang   (macOS)
 #   sudo apt-get install tesseract-ocr tesseract-ocr-deu tesseract-ocr-fra tesseract-ocr-ita
