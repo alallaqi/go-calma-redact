@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 import uuid
 
 import fitz  # pymupdf
@@ -15,7 +17,7 @@ APPROACHES = {
     "redact": "Remove PII completely (black box, no text)",
     "replace": "Replace with entity type label, e.g. <PERSON>",
     "mask": "Replace with masking characters (****)",
-    "hash": "Replace with a SHA-256 hash of the value",
+    "hash": "Replace with a salted HMAC-SHA256 hash (irreversible without key file)",
     "encrypt": "Replace with an encrypted label (reversible via key file)",
     "highlight": "Yellow highlight over PII (text stays visible)",
     "synthesize": "Replace with synthetic placeholder text",
@@ -39,13 +41,22 @@ _SYNTH_MAP = {
 }
 
 
-def _replacement_text(ent: PIIEntity, approach: str, label: str = "") -> str:
+def _replacement_text(
+    ent: PIIEntity,
+    approach: str,
+    label: str = "",
+    hmac_key: bytes | None = None,
+) -> str:
     """Compute the overlay/replacement string for a given approach.
 
     ``label`` is the unique tracking label already assigned to this entity
     (e.g. ``[PERSON_a3f2c1]``).  It is embedded by the *encrypt* approach so
     the overlay is visually distinctive without requiring per-token crypto —
     actual reversal is provided by the encrypted key file.
+
+    ``hmac_key``, when provided, is used for the *hash* approach so that the
+    output is a salted HMAC-SHA256 digest — immune to rainbow-table attacks
+    on short PII values like phone numbers or SSNs.
     """
     if approach == "redact":
         return ""
@@ -54,7 +65,12 @@ def _replacement_text(ent: PIIEntity, approach: str, label: str = "") -> str:
     if approach == "mask":
         return "*" * len(ent.text)
     if approach == "hash":
-        h = hashlib.sha256(ent.text.encode()).hexdigest()[:12]
+        if hmac_key:
+            h = hmac.new(hmac_key, ent.text.encode(), "sha256").hexdigest()[:12]
+        else:
+            # Preview path (no key yet) — plain hash is acceptable since
+            # the preview is ephemeral and never saved to disk.
+            h = hashlib.sha256(ent.text.encode()).hexdigest()[:12]
         return f"[#{h}]"
     if approach == "encrypt":
         # The actual value is stored encrypted in the key file.
@@ -308,6 +324,31 @@ def map_words_to_entities(
 
 
 # ---------------------------------------------------------------------------
+# Security helper — flatten scanned pages to destroy original pixels
+# ---------------------------------------------------------------------------
+
+def _flatten_page_as_image(doc: fitz.Document, page_num: int, dpi: int = 150) -> None:
+    """Re-render a page as a flat image, replacing all original content.
+
+    After ``apply_redactions()`` on a scanned page, the original image pixels
+    may still exist underneath the black redaction boxes.  This function
+    renders the (already-redacted) page to a PNG, deletes the page, inserts
+    a new blank page at the same position, and paints the rendered image as
+    the sole content — guaranteeing no recoverable original pixels remain.
+    """
+    page = doc[page_num]
+    rect = page.rect
+    pix = page.get_pixmap(dpi=dpi)
+    img_bytes = pix.tobytes("png")
+
+    # Replace: delete old page, insert fresh blank, paint the flat image.
+    doc.delete_page(page_num)
+    doc.new_page(pno=page_num, width=rect.width, height=rect.height)
+    new_page = doc[page_num]
+    new_page.insert_image(new_page.rect, stream=img_bytes)
+
+
+# ---------------------------------------------------------------------------
 # Final redaction (destructive, produces the downloadable PDF)
 # ---------------------------------------------------------------------------
 
@@ -340,6 +381,13 @@ def redact_pdf(
     try:
         mapping: dict[str, str] = {}
 
+        # Generate a random HMAC key for the "hash" approach.  Stored in the
+        # encrypted key file so hashes can be verified later, but an attacker
+        # without the key file cannot brute-force short PII values.
+        hmac_key = os.urandom(32)
+        if approach == "hash":
+            mapping["__hmac_key__"] = hmac_key.hex()
+
         is_highlight    = approach == "highlight"
         is_redact_blank = approach == "redact"
 
@@ -358,7 +406,7 @@ def redact_pdf(
 
                 label   = f"[{ent.entity_type}_{uuid.uuid4().hex[:6]}]"
                 mapping[label] = ent.text
-                overlay = _replacement_text(ent, approach, label)
+                overlay = _replacement_text(ent, approach, label, hmac_key=hmac_key)
 
                 for rect in rects:
                     if flatten:
@@ -377,17 +425,19 @@ def redact_pdf(
                             )
                     else:
                         # ── Reversible (annotation) mode ───────────
+                        # SECURITY: Never store original PII text in annotation
+                        # metadata — only the entity type label is safe to embed.
                         if is_highlight:
                             annot = page.add_highlight_annot(rect)
                             annot.set_colors(stroke=(1, 0.9, 0))
-                            annot.set_info(content=f"{ent.entity_type}: {ent.text}")
+                            annot.set_info(content=label)
                             annot.update()
                         elif is_redact_blank or not overlay:
                             # Opaque black rectangle — hides text visually
                             annot = page.add_rect_annot(rect)
                             annot.set_colors(stroke=(0, 0, 0), fill=(0, 0, 0))
                             annot.set_opacity(1.0)
-                            annot.set_info(content=f"{ent.entity_type}")
+                            annot.set_info(content=label)
                             annot.update()
                         else:
                             # Text overlay — shows replacement on black bg
@@ -400,15 +450,19 @@ def redact_pdf(
                             )
                             annot.set_border(width=0)
                             annot.set_opacity(1.0)
-                            annot.set_info(content=f"{ent.entity_type}: {ent.text}")
+                            annot.set_info(content=label)
                             annot.update()
 
             # Only flatten pages that used redact annotations.
             if flatten and not is_highlight:
-                # PDF_REDACT_IMAGE_NONE (0): keep images, draw black fill on top.
-                # PDF_REDACT_IMAGE_REMOVE (1) would delete the entire page image
-                # on scanned/OCR PDFs, leaving a blank white page.
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+                # SECURITY: For scanned/OCR pages the original image pixels
+                # survive under the black redaction boxes (forensic recovery
+                # risk).  Re-render the page as a flat image and replace the
+                # page content so no original pixels remain.
+                if page_text is not None and page_text.is_ocr:
+                    _flatten_page_as_image(doc, page_num)
 
         output_bytes = doc.tobytes(deflate=True)
     finally:

@@ -6,9 +6,35 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import base64
+import logging
 from pathlib import Path
 
 import streamlit as st
+
+
+# ---------------------------------------------------------------------------
+# Log capture — surface warnings from detection modules in the Streamlit UI
+# ---------------------------------------------------------------------------
+
+class _WarningCollector(logging.Handler):
+    """Collects WARNING+ log records from gocalma.* modules."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def flush_warnings(self) -> list[str]:
+        msgs = [self.format(r) for r in self.records]
+        self.records.clear()
+        return msgs
+
+
+_warning_collector = _WarningCollector()
+_warning_collector.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+logging.getLogger("gocalma").addHandler(_warning_collector)
 
 from gocalma.pdf_extract import extract_text
 from gocalma.pii_detect import detect_pii_all_pages, PIIEntity, NLP_MODELS, DEFAULT_MODEL, available_models
@@ -31,6 +57,15 @@ from gocalma.crypto import (
 )
 
 _MAX_PDF_MB = 50  # Upload size cap shown in the UI
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Return exception message with filesystem paths stripped out."""
+    import re
+    msg = f"{type(exc).__name__}: {exc}"
+    # Remove absolute paths (Unix and Windows style)
+    msg = re.sub(r"(/[^\s:]+/|[A-Z]:\\[^\s:]+\\)", "<path>/", msg)
+    return msg
 
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
@@ -96,10 +131,9 @@ st.set_page_config(
 
 st.markdown(f"""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
     html, body, [class*="css"] {{
-        font-family: 'Inter', sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                     'Helvetica Neue', Arial, sans-serif;
     }}
 
     /* ---- Sidebar ---- */
@@ -413,6 +447,13 @@ with st.sidebar:
             "to reveal the original."
         ),
     )
+    if output_mode == "Reversible (annotations)":
+        st.warning(
+            "**Security notice:** Reversible mode adds annotation overlays that "
+            "visually hide PII but do **not** destroy it. Anyone with a PDF editor "
+            "can remove the annotations and see the original text. "
+            "Use **Permanent** mode for sensitive documents."
+        )
 
     st.divider()
     st.markdown(
@@ -444,7 +485,7 @@ with st.sidebar:
             st.success(f"Decrypted {len(mapping)} redaction(s)")
             st.json(mapping)
         except Exception as exc:
-            st.error(f"Failed to decrypt: {exc}")
+            st.error(f"Failed to decrypt: {_sanitize_error(exc)}")
 
 # ---------------------------------------------------------------------------
 # Step 1: Upload
@@ -510,17 +551,33 @@ if st.session_state.step == "extract" and st.session_state.pdf_bytes:
         st.session_state.entities = entities
         st.session_state.approved = approved_defaults
 
+        # Surface any warnings from OCR / NER / LLM modules.
+        detection_warnings = _warning_collector.flush_warnings()
+        ocr_failed = sum(1 for p in pages if p.is_ocr and not p.text.strip())
+
         summary = f"Found **{len(entities)}** potential PII entities"
         if disputed or llm_new:
             summary += f" ({len(disputed)} disputed, {len(llm_new)} new from LLM)"
         st.success(summary + ".")
+
+        if ocr_failed:
+            st.warning(
+                f"**{ocr_failed} page(s) returned no text** after OCR. "
+                "PII on those pages could not be detected. "
+                "Check that the document is not corrupted or password-protected."
+            )
+        if detection_warnings:
+            with st.expander(f"Detection warnings ({len(detection_warnings)})", expanded=False):
+                for w in detection_warnings:
+                    st.caption(w)
+
         st.session_state.step = "review"
         st.rerun()
 
     except Exception as exc:
         st.session_state.step = "upload"
         st.error(
-            f"Processing failed: **{type(exc).__name__}** — {exc}\n\n"
+            f"Processing failed: {_sanitize_error(exc)}\n\n"
             "Please check that the selected NER model is fully installed, "
             "then try uploading the file again."
         )
@@ -658,17 +715,30 @@ if st.session_state.step == "review":
 
     # -- Action buttons -----------------------------------------------------
     st.divider()
-    with st.expander("Key file passphrase (optional but recommended)"):
+    with st.expander("Key file passphrase", expanded=True):
         st.text_input(
             "Protect the key file with a passphrase",
             type="password",
             key="key_password",
             help=(
-                "If set, the .gocalma key file can only be opened with this passphrase. "
-                "Leave blank to generate an unprotected key file (the file itself must then "
-                "be kept private)."
+                "The .gocalma key file is encrypted with this passphrase via "
+                "PBKDF2-HMAC-SHA256 (480k iterations). Without it, anyone who "
+                "obtains the file can decrypt your redaction mapping."
             ),
         )
+        _pw = st.session_state.get("key_password", "")
+        if not _pw:
+            st.warning(
+                "**No passphrase set.** The key file will contain an unprotected "
+                "encryption key. Anyone with the file can reverse your redactions. "
+                "Set a passphrase above for production use."
+            )
+        elif len(_pw.strip()) < 8:
+            st.warning(
+                "**Passphrase too short.** Use at least 8 characters for adequate security."
+            )
+        elif _pw != _pw.strip():
+            st.warning("Passphrase has leading/trailing spaces — make sure this is intentional.")
 
     col_a, col_b = st.columns(2)
     if col_a.button("Start Over", use_container_width=True):
@@ -676,7 +746,12 @@ if st.session_state.step == "review":
             del st.session_state[k]
         st.rerun()
 
-    if col_b.button("Apply Redactions", type="primary", use_container_width=True, disabled=not any(approved)):
+    _pw_value = st.session_state.get("key_password", "")
+    _pw_too_short = bool(_pw_value and len(_pw_value.strip()) < 8)
+    if col_b.button(
+        "Apply Redactions", type="primary", use_container_width=True,
+        disabled=not any(approved) or _pw_too_short,
+    ):
         st.session_state.step = "redact"
         st.rerun()
 
@@ -714,7 +789,7 @@ if st.session_state.step == "redact":
     except Exception as exc:
         st.session_state.step = "review"
         st.error(
-            f"Redaction failed: **{type(exc).__name__}** — {exc}\n\n"
+            f"Redaction failed: {_sanitize_error(exc)}\n\n"
             "Your document and detected entities are still available. "
             "You can adjust the approach or entity selection and try again."
         )

@@ -8,10 +8,13 @@ Supports two backends:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 from gocalma.pii_detect import PIIEntity
 
@@ -274,6 +277,11 @@ def llm_verify_entities(
 
     truncated = text[:5000]
 
+    # SECURITY: Strip content delimiter tags from the document text so a
+    # malicious PDF cannot inject a fake closing tag and break out of the
+    # content boundary to inject instructions.
+    truncated = truncated.replace(_CONTENT_START, "").replace(_CONTENT_END, "")
+
     ner_summary = json.dumps(
         [{"index": i, "type": e.entity_type, "text": e.text} for i, e in enumerate(page_ents)],
         indent=None,
@@ -299,8 +307,8 @@ def llm_verify_entities(
             pipe = _get_pipeline(model_key)
             response = pipe(messages, max_new_tokens=1024)
             assistant_text = response[0]["generated_text"][-1]["content"]
-    except Exception:
-        # If inference fails, return original entities unchanged.
+    except Exception as exc:
+        _log.warning("LLM verification failed (returning NER-only results): %s", exc)
         return page_ents
 
     result = _parse_verify_response(assistant_text)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from presidio_analyzer import (
     AnalyzerEngine,
@@ -203,7 +206,8 @@ class _SwissBertRecognizer(EntityRecognizer):
         try:
             pipe = _get_swissbert_pipe()
             items = pipe(text[: self._MAX_CHARS])
-        except Exception:
+        except Exception as exc:
+            _log.warning("SwissBERT-NER failed — no entities from this recognizer: %s", exc)
             return []
 
         results: list[RecognizerResult] = []

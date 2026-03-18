@@ -8,8 +8,11 @@ OCR engine priority (auto-selected, first available wins):
 from __future__ import annotations
 
 import io
+import logging
 import threading
 from dataclasses import dataclass, field
+
+_log = logging.getLogger(__name__)
 
 import fitz  # pymupdf
 
@@ -17,6 +20,10 @@ import fitz  # pymupdf
 # (≈ 6 MB uncompressed) — sufficient accuracy while avoiding the ≈ 26 MB/page
 # footprint of 300 DPI.  Callers can override via the ``ocr_dpi`` parameter.
 _DEFAULT_OCR_DPI = 200
+
+# Safety limit: maximum number of pages to process.  Prevents OOM on
+# pathologically large PDFs (OCR allocates ~6 MB/page at 200 DPI).
+MAX_PAGES = 500
 
 
 @dataclass
@@ -96,6 +103,7 @@ def extract_text(
     ocr_if_empty: bool = True,
     ocr_dpi: int = _DEFAULT_OCR_DPI,
     ocr_lang: str = "deu+fra+ita+eng",
+    max_pages: int = MAX_PAGES,
 ) -> list[PageText]:
     """Extract text from every page.
 
@@ -109,9 +117,15 @@ def extract_text(
         ocr_dpi:      Rendering resolution for OCR (default 200 DPI).
         ocr_lang:     Tesseract language string — ignored when Surya is used
                       (Surya auto-detects language).
+        max_pages:    Safety limit on page count to prevent OOM.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
+        if len(doc) > max_pages:
+            raise ValueError(
+                f"PDF has {len(doc)} pages (limit is {max_pages}). "
+                "Split the document into smaller parts before processing."
+            )
         pages: list[PageText] = []
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -248,7 +262,8 @@ def _ocr_page_surya(page: fitz.Page, dpi: int = _DEFAULT_OCR_DPI) -> tuple[str, 
 
         return "".join(text_parts).strip(), word_boxes
 
-    except Exception:
+    except Exception as exc:
+        _log.warning("Surya OCR failed on page: %s", exc)
         return "", []
 
 
@@ -324,7 +339,8 @@ def _ocr_page_tesseract(
 
         return "".join(text_parts).strip(), word_boxes
 
-    except Exception:
+    except Exception as exc:
+        _log.warning("Tesseract OCR failed on page: %s", exc)
         return "", []
 
 
