@@ -6,8 +6,15 @@ import importlib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern, RecognizerResult
+from presidio_analyzer import (
+    AnalyzerEngine,
+    EntityRecognizer,
+    PatternRecognizer,
+    Pattern,
+    RecognizerResult,
+)
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 
@@ -106,7 +113,119 @@ def _make_swiss_recognizers(lang: str) -> list[PatternRecognizer]:
                      "id", "identifikation", "deklaration", "steuernummer"],
             supported_language=lang,
         ),
+        # Insurance / policy numbers: "100 452 956", "100 452 957"
+        # Swiss insurers use space-separated 9-digit numbers after "insurance no."
+        PatternRecognizer(
+            supported_entity="INSURANCE_NUMBER",
+            name="Insurance / Policy Number",
+            patterns=[
+                # 3-3-3 space-separated (most common Swiss format)
+                Pattern("INS_SPACE_9", r"\b\d{3}\s\d{3}\s\d{3}\b", 0.65),
+                # 10-digit compact (e.g. "1004529560")
+                Pattern("INS_COMPACT", r"\b\d{9,10}\b", 0.40),
+            ],
+            context=["insurance", "versicherung", "police", "policen", "assurance",
+                     "policy", "vertrag", "no.", "nr.", "nummer", "numéro"],
+            supported_language=lang,
+        ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# SwissBERT-NER direct integration
+# ---------------------------------------------------------------------------
+
+_SWISSBERT_MODEL_ID = "ZurichNLP/swissbert-ner"
+
+# Map XMod/HuggingFace label groups → Presidio entity types
+_SWISSBERT_LABEL_MAP: dict[str, str] = {
+    "PER": "PERSON",
+    "LOC": "LOCATION",
+    "ORG": "ORGANIZATION",
+}
+
+_swissbert_pipe = None
+_swissbert_pipe_lock = threading.Lock()
+
+
+def _swissbert_model_cached() -> bool:
+    """Return True if swissbert-ner weights are in the HuggingFace cache."""
+    try:
+        cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+        return any(cache_dir.glob("models--ZurichNLP--swissbert-ner"))
+    except Exception:
+        return False
+
+
+def _get_swissbert_pipe():
+    """Lazily load and cache the SwissBERT-NER pipeline (thread-safe)."""
+    global _swissbert_pipe
+    if _swissbert_pipe is None:
+        with _swissbert_pipe_lock:
+            if _swissbert_pipe is None:
+                from transformers import pipeline
+                pipe = pipeline(
+                    "token-classification",
+                    model=_SWISSBERT_MODEL_ID,
+                    aggregation_strategy="simple",
+                )
+                # XMod models require set_default_language to produce any output.
+                if hasattr(pipe.model, "set_default_language"):
+                    pipe.model.set_default_language("de_CH")
+                _swissbert_pipe = pipe
+    return _swissbert_pipe
+
+
+class _SwissBertRecognizer(EntityRecognizer):
+    """Presidio EntityRecognizer that runs ZurichNLP/swissbert-ner directly.
+
+    Bypasses Presidio's TransformersNlpEngine so we can call
+    ``set_default_language`` reliably without navigating fragile internals.
+    """
+
+    SUPPORTED_ENTITIES = ["PERSON", "LOCATION", "ORGANIZATION"]
+    # BERT tokenisers cap at 512 tokens; 4 500 chars is safe for most pages.
+    _MAX_CHARS = 4500
+
+    def __init__(self, supported_language: str = "de"):
+        super().__init__(
+            supported_entities=self.SUPPORTED_ENTITIES,
+            name="SwissBertNerRecognizer",
+            supported_language=supported_language,
+        )
+
+    def load(self) -> None:
+        pass  # lazy — pipeline is loaded on first analyze() call
+
+    def analyze(
+        self, text: str, entities: list[str], nlp_artifacts=None
+    ) -> list[RecognizerResult]:
+        try:
+            pipe = _get_swissbert_pipe()
+            items = pipe(text[: self._MAX_CHARS])
+        except Exception:
+            return []
+
+        results: list[RecognizerResult] = []
+        for item in items:
+            entity_group = item.get("entity_group", item.get("entity", ""))
+            # Strip B-/I- prefix when aggregation_strategy is not used
+            if entity_group.startswith(("B-", "I-")):
+                entity_group = entity_group[2:]
+            entity_type = _SWISSBERT_LABEL_MAP.get(entity_group)
+            if entity_type is None:
+                continue
+            if entities and entity_type not in entities:
+                continue
+            results.append(
+                RecognizerResult(
+                    entity_type=entity_type,
+                    start=item["start"],
+                    end=item["end"],
+                    score=float(item["score"]),
+                )
+            )
+        return results
 
 
 # Maps each backend engine name to the Python package it requires.
@@ -162,13 +281,12 @@ NLP_MODELS: dict[str, dict] = {
     },
     # ---------- Swiss / multilingual models ----------
     "HuggingFace/ZurichNLP/swissbert-ner": {
-        "engine_name": "transformers",
-        "model_name": {
-            "spacy": "en_core_web_sm",
-            "transformers": "ZurichNLP/swissbert-ner",
-        },
+        # Uses _SwissBertRecognizer (direct transformers.pipeline load) instead
+        # of Presidio's TransformersNlpEngine — avoids fragile internal hacking.
+        "engine_name": "swissbert",
+        "model_name": "ZurichNLP/swissbert-ner",
         "lang_codes": ["de", "fr", "it", "rm"],
-        "swissbert": True,   # triggers XMod language adapter init
+        "swissbert": True,
     },
     # German spaCy model — install: python -m spacy download de_core_news_lg
     "spaCy/de_core_news_lg": {
@@ -189,6 +307,13 @@ DEFAULT_MODEL = "spaCy/en_core_web_lg"
 
 def _backend_installed(engine_name: str) -> bool:
     """Check whether the Python package for a backend is importable."""
+    if engine_name == "swissbert":
+        # SwissBERT requires transformers + the model weights to be cached.
+        try:
+            importlib.import_module("transformers")
+        except ImportError:
+            return False
+        return _swissbert_model_cached()
     pkg = _BACKEND_PACKAGES.get(engine_name)
     if pkg is None:
         return False
@@ -230,34 +355,35 @@ _engines_lock = threading.Lock()
 
 
 def _build_swissbert_engine(cfg: dict, lang_codes: list[str]) -> AnalyzerEngine:
-    """Build a Presidio AnalyzerEngine backed by SwissBERT-NER.
+    """Build a Presidio AnalyzerEngine using SwissBERT-NER as a direct recognizer.
 
-    SwissBERT is an XMod model that requires ``set_default_language`` to be
-    called after the pipeline is loaded, otherwise it produces no NER output.
-    We call it here immediately after provider.create_engine() returns.
+    Uses a spaCy base engine (en_core_web_lg) purely for tokenisation so that
+    Presidio's pattern recognizers work.  All NER is handled by
+    _SwissBertRecognizer which calls transformers.pipeline directly and invokes
+    set_default_language('de_CH') after load — no fragile internal navigation.
     """
-    from presidio_analyzer.nlp_engine import TransformersNlpEngine  # noqa: F401
-
+    # Map all Swiss lang codes to en_core_web_lg for tokenisation only.
     provider = NlpEngineProvider(nlp_configuration={
-        "nlp_engine_name": "transformers",
+        "nlp_engine_name": "spacy",
         "models": [
-            {"lang_code": lc, "model_name": cfg["model_name"]}
+            {"lang_code": lc, "model_name": "en_core_web_lg"}
             for lc in lang_codes
         ],
     })
     nlp_engine = provider.create_engine()
+    engine = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=lang_codes)
 
-    # Activate the language adapter inside the XMod model.
-    try:
-        for nlp_pipeline in nlp_engine.nlp.values():
-            hf_pipe = nlp_pipeline.get_pipe("hf_token_pipe")
-            model = hf_pipe.hf_pipeline.model
-            if hasattr(model, "set_default_language"):
-                model.set_default_language("de_CH")
-    except Exception:
-        pass  # If the structure changes in a future version, degrade gracefully.
+    # Remove the default SpacyRecognizer — English NER on DE/FR/IT text is noise.
+    engine.registry.recognizers = [
+        r for r in engine.registry.recognizers
+        if r.__class__.__name__ != "SpacyRecognizer"
+    ]
 
-    return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=lang_codes)
+    # Add the SwissBERT direct recognizer for each supported language.
+    for lc in lang_codes:
+        engine.registry.add_recognizer(_SwissBertRecognizer(supported_language=lc))
+
+    return engine
 
 
 def _get_engine(model_key: str = DEFAULT_MODEL) -> AnalyzerEngine:

@@ -68,34 +68,41 @@ You are a PII detection engine specialising in Swiss and European documents \
 German, French, Italian, or English.
 
 You receive text extracted from a document and a list of PII entities already \
-detected by an NER model. Your job is to verify those and find anything missed.
+detected by an NER model. Your job is to:
+1. Verify each NER entity (confirm or reject)
+2. Find ADDITIONAL PII the NER missed — this is critical
 
-PII includes ALL of the following — be thorough:
-- Full names and salutations (e.g. "Herr Max Mustermann", "Frau Muster")
-- Street addresses with house number (e.g. "Musterstrasse 1")
-- Postal codes with city (e.g. "8003 Zürich", "3360 Herzogenbuchsee")
-- Phone numbers in any format (e.g. "044 123 45 67", "+41 44 123 45 67")
-- Email addresses
-- Dates of birth and deadlines (e.g. "26. März 1975", "31.01.2024")
-- Swiss AHV / AVS / AHVN13 numbers (format: 756.XXXX.XXXX.XX)
-- Swiss access codes / Zugangscodes / login credentials — THESE ARE SENSITIVE \
-  (e.g. "ABCD-EFgh-IJKL-MNop", mixed upper/lowercase hyphen-separated codes)
-- Personal IDs / PID (e.g. "12-3456-78")
-- Document IDs and reference numbers (e.g. "100000000000", "63227 DE 50.1 U")
+PII includes ALL of the following — look carefully for each category:
+
+NAMES & CONTACT:
+- Full names and salutations: "Herr Max Mustermann", "Frau Muster", "Team Jeanette Zumtaugwald"
+- Phone numbers in any format: "044 123 45 67", "+41 58 340 19 82"
+- Email addresses: "kb2.bern@helsana.ch"
+
+ADDRESSES:
+- Street addresses: "Feldlerchenweg 15", "Musterstrasse 1"
+- Postal codes with city: "3360 Herzogenbuchsee", "8003 Zürich"
+
+NUMBERS THAT IDENTIFY A PERSON — these are the most commonly missed:
+- Insurance / policy numbers: "100 452 956", "100 452 957" (often after "insurance no.", \
+  "Versicherungs-Nr.", "Police Nr." — 3-3-3 digit groups or 9-10 digit numbers)
+- Swiss AHV / AVS / AHVN13: "756.1234.5678.90"
+- Swiss access codes / Zugangscodes: "ABCD-EFgh-IJKL-MNop" (mixed case, hyphen-separated)
+- Personal IDs / PID: "12-3456-78"
+- Reference / document numbers: "100000000000", "63227 DE 50.1 U"
 - IBAN / bank account numbers
-- Insurance policy numbers
 - Passport / ID card numbers
-- Any other code or number that uniquely identifies a person or their account
 
-IMPORTANT — only mark as false_positive if the text is clearly generic with NO \
-personal significance: e.g. plain common nouns ("Stadt", "Kanton"), generic \
-website domains that are NOT the user's personal credentials, \
-or structural document labels ("Datum:", "Name:").
-When in doubt, mark as "confirmed".
+DATES:
+- Dates of birth and deadlines: "26. März 1975", "31.01.2024", "29.12.1983"
 
-Your tasks:
-1. For EACH entity in the list: return "confirmed" or "false_positive"
-2. Find ADDITIONAL PII the NER missed and return it in "additional"
+Pay special attention to numbers that appear near words like "no.", "Nr.", "insurance", \
+"Versicherung", "police", "policy", "Vertrag". These are almost always PII.
+
+IMPORTANT — only mark as false_positive if the text is clearly generic: \
+common nouns ("Stadt", "Kanton"), generic website domains, \
+or structural labels ("Datum:", "Name:").
+When in doubt, mark as "confirmed". Missing real PII is worse than a false alarm.
 
 Return ONLY a JSON object (no explanation, no markdown, no code fences):
 {{
@@ -104,9 +111,11 @@ Return ONLY a JSON object (no explanation, no markdown, no code fences):
     {{"index": 1, "verdict": "false_positive"}}
   ],
   "additional": [
-    {{"type": "PERSON", "text": "exact substring from document", "start": 10, "end": 25}}
+    {{"type": "INSURANCE_NUMBER", "text": "100 452 956", "start": 10, "end": 21}}
   ]
 }}
+
+The "text" field MUST be an exact substring copy-pasted from the document below.
 
 Valid types: PERSON, EMAIL_ADDRESS, PHONE_NUMBER, ADDRESS, LOCATION, DATE_TIME, \
 IBAN_CODE, CREDIT_CARD, IP_ADDRESS, CH_AHV, CH_ACCESS_CODE, CH_ID_NUMBER, \
@@ -263,7 +272,7 @@ def llm_verify_entities(
     if not text.strip():
         return page_ents
 
-    truncated = text[:3000]
+    truncated = text[:5000]
 
     ner_summary = json.dumps(
         [{"index": i, "type": e.entity_type, "text": e.text} for i, e in enumerate(page_ents)],

@@ -129,6 +129,11 @@ st.markdown(f"""
     section[data-testid="stSidebar"] .stAlert * {{
         color: {NAVY_DARK} !important;
     }}
+    /* Radio button option labels */
+    section[data-testid="stSidebar"] [role="radiogroup"] label p,
+    section[data-testid="stSidebar"] [role="radiogroup"] label span {{
+        color: {WHITE} !important;
+    }}
     /* Dropdown popover (portaled to body, outside sidebar) */
     [data-baseweb="menu"],
     [data-baseweb="menu"] * {{
@@ -331,7 +336,20 @@ with st.sidebar:
     )
     if selected_model not in installed:
         engine_name = NLP_MODELS[selected_model]["engine_name"]
-        st.warning(f"Install the **{engine_name}** package to use this model:\n\n`pip install {engine_name}`")
+        if engine_name == "swissbert":
+            st.warning(
+                "SwissBERT-NER model weights not found in cache (~500 MB).\n\n"
+                "**Download:**\n"
+                "```\npython -c \""
+                "from transformers import pipeline; "
+                "pipeline('token-classification', model='ZurichNLP/swissbert-ner')"
+                "\"\n```"
+            )
+        else:
+            st.warning(
+                f"Install the **{engine_name}** package to use this model:\n\n"
+                f"`pip install {engine_name}`"
+            )
 
     st.divider()
 
@@ -378,6 +396,23 @@ with st.sidebar:
         key="deid_approach",
     )
     st.caption(APPROACHES[selected_approach])
+
+    st.divider()
+
+    st.subheader("Output mode")
+    output_mode = st.radio(
+        "Redaction mode",
+        options=["Permanent (flattened)", "Reversible (annotations)"],
+        index=0,
+        key="output_mode",
+        help=(
+            "**Permanent:** text is destroyed in the PDF — need the .gocalma key file "
+            "to know what was redacted.\n\n"
+            "**Reversible:** annotations cover the text visually but the original "
+            "content is preserved underneath. Remove annotations in any PDF editor "
+            "to reveal the original."
+        ),
+    )
 
     st.divider()
     st.markdown(
@@ -656,12 +691,16 @@ if st.session_state.step == "redact":
         selected = [ent for ent, ok in zip(entities, approved) if ok]
 
         approach = st.session_state.get("deid_approach", DEFAULT_APPROACH)
-        with st.spinner(f"Applying **{approach}** to {len(selected)} entities..."):
+        is_flatten = st.session_state.get("output_mode", "Permanent (flattened)") == "Permanent (flattened)"
+        mode_label = "permanent" if is_flatten else "reversible"
+        with st.spinner(f"Applying **{approach}** ({mode_label}) to {len(selected)} entities..."):
             redacted_bytes, mapping = redact_pdf(
                 st.session_state.pdf_bytes, selected,
                 approach=approach,
                 pages=st.session_state.get("pages"),
+                flatten=is_flatten,
             )
+        st.session_state.is_flatten = is_flatten
 
         key = generate_key()
         ciphertext = encrypt_mapping(mapping, key)
@@ -708,6 +747,8 @@ if st.session_state.step == "done":
 
     st.divider()
 
+    is_flatten = st.session_state.get("is_flatten", True)
+
     col1, col2 = st.columns(2)
     col1.download_button(
         "Download Redacted PDF",
@@ -724,7 +765,17 @@ if st.session_state.step == "done":
         use_container_width=True,
     )
 
-    st.info("**Keep the key file safe.** It's the only way to reverse the redactions.")
+    if is_flatten:
+        st.info(
+            "**Permanent mode** — the text has been removed from the PDF. "
+            "Keep the key file safe — it's the only way to know what was redacted."
+        )
+    else:
+        st.info(
+            "**Reversible mode** — the original text is preserved under the annotations. "
+            "To reveal it, open the PDF in any editor (Preview, Acrobat, etc.) and delete "
+            "the annotation overlays. The key file is also included for reference."
+        )
 
     st.divider()
     if st.button("Start Over", use_container_width=True):

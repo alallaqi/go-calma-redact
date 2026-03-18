@@ -94,20 +94,33 @@ def _find_rects_for_entity(
         return []
 
     # Find every word box that overlaps with the entity's character span.
-    matching = [
-        wb for wb in page_text.word_boxes
-        if wb.char_start < ent.end and wb.char_end > ent.start
-    ]
+    matching = sorted(
+        [wb for wb in page_text.word_boxes
+         if wb.char_start < ent.end and wb.char_end > ent.start],
+        key=lambda w: (w.y0, w.x0),
+    )
     if not matching:
         return []
 
-    # Return a single rect that spans all matching words.
-    return [fitz.Rect(
-        min(wb.x0 for wb in matching),
-        min(wb.y0 for wb in matching),
-        max(wb.x1 for wb in matching),
-        max(wb.y1 for wb in matching),
-    )]
+    # Group word boxes by line (similar y-coordinate) so multi-line entities
+    # produce per-line rectangles instead of one giant bounding box.
+    lines: list[list[WordBox]] = []
+    for wb in matching:
+        line_height = wb.y1 - wb.y0
+        if lines and abs(wb.y0 - lines[-1][0].y0) < line_height * 0.5:
+            lines[-1].append(wb)
+        else:
+            lines.append([wb])
+
+    return [
+        fitz.Rect(
+            min(w.x0 for w in line),
+            min(w.y0 for w in line),
+            max(w.x1 for w in line),
+            max(w.y1 for w in line),
+        )
+        for line in lines
+    ]
 
 
 def _page_text_for(pages: list[PageText] | None, page_num: int) -> PageText | None:
@@ -303,11 +316,20 @@ def redact_pdf(
     entities: list[PIIEntity],
     approach: str = DEFAULT_APPROACH,
     pages: list[PageText] | None = None,
+    flatten: bool = True,
 ) -> tuple[bytes, dict[str, str]]:
     """Apply de-identification to the supplied PII entities in the PDF.
 
     ``pages`` should be the full list of PageText objects produced by
     ``extract_text``.  Required for correct redaction of OCR/scanned pages.
+
+    Args:
+        flatten: If True (default), permanently removes the text layer via
+                 ``apply_redactions()``.  The original text can only be
+                 recovered using the encrypted ``.gocalma`` key file.
+                 If False, adds opaque annotation overlays that visually
+                 cover PII but preserve the underlying text.  Removing the
+                 annotations in any PDF editor reveals the original.
 
     Returns:
         output_pdf_bytes: the processed PDF.
@@ -321,9 +343,6 @@ def redact_pdf(
         is_highlight    = approach == "highlight"
         is_redact_blank = approach == "redact"
 
-        fill_color = None if is_highlight else (0, 0, 0)
-        text_color = (0, 0, 0) if is_highlight else (1, 1, 1)
-
         entities_by_page: dict[int, list[PIIEntity]] = {}
         for ent in entities:
             entities_by_page.setdefault(ent.page_num, []).append(ent)
@@ -332,37 +351,64 @@ def redact_pdf(
             page      = doc[page_num]
             page_text = _page_text_for(pages, page_num)
 
-            if is_highlight:
-                for ent in page_entities:
-                    rects = _find_rects_for_entity(page, ent, page_text)
-                    if not rects:
-                        continue
-                    label = f"[{ent.entity_type}_{uuid.uuid4().hex[:6]}]"
-                    mapping[label] = ent.text
-                    for rect in rects:
-                        annot = page.add_highlight_annot(rect)
-                        annot.set_colors(stroke=(1, 0.9, 0))
-                        annot.update()
-            else:
-                for ent in page_entities:
-                    rects = _find_rects_for_entity(page, ent, page_text)
-                    if not rects:
-                        continue
+            for ent in page_entities:
+                rects = _find_rects_for_entity(page, ent, page_text)
+                if not rects:
+                    continue
 
-                    label   = f"[{ent.entity_type}_{uuid.uuid4().hex[:6]}]"
-                    mapping[label] = ent.text
-                    overlay = _replacement_text(ent, approach, label)
+                label   = f"[{ent.entity_type}_{uuid.uuid4().hex[:6]}]"
+                mapping[label] = ent.text
+                overlay = _replacement_text(ent, approach, label)
 
-                    for rect in rects:
-                        page.add_redact_annot(
-                            rect,
-                            text="" if is_redact_blank else overlay,
-                            fontsize=7,
-                            fill=fill_color,
-                            text_color=text_color,
-                        )
+                for rect in rects:
+                    if flatten:
+                        # ── Permanent (flattened) mode ──────────────
+                        if is_highlight:
+                            annot = page.add_highlight_annot(rect)
+                            annot.set_colors(stroke=(1, 0.9, 0))
+                            annot.update()
+                        else:
+                            page.add_redact_annot(
+                                rect,
+                                text="" if is_redact_blank else overlay,
+                                fontsize=7,
+                                fill=(0, 0, 0),
+                                text_color=(1, 1, 1),
+                            )
+                    else:
+                        # ── Reversible (annotation) mode ───────────
+                        if is_highlight:
+                            annot = page.add_highlight_annot(rect)
+                            annot.set_colors(stroke=(1, 0.9, 0))
+                            annot.set_info(content=f"{ent.entity_type}: {ent.text}")
+                            annot.update()
+                        elif is_redact_blank or not overlay:
+                            # Opaque black rectangle — hides text visually
+                            annot = page.add_rect_annot(rect)
+                            annot.set_colors(stroke=(0, 0, 0), fill=(0, 0, 0))
+                            annot.set_opacity(1.0)
+                            annot.set_info(content=f"{ent.entity_type}")
+                            annot.update()
+                        else:
+                            # Text overlay — shows replacement on black bg
+                            annot = page.add_freetext_annot(
+                                rect,
+                                overlay,
+                                fontsize=min(7, rect.height * 0.7),
+                                text_color=(1, 1, 1),
+                                fill_color=(0, 0, 0),
+                            )
+                            annot.set_border(width=0)
+                            annot.set_opacity(1.0)
+                            annot.set_info(content=f"{ent.entity_type}: {ent.text}")
+                            annot.update()
 
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE)
+            # Only flatten pages that used redact annotations.
+            if flatten and not is_highlight:
+                # PDF_REDACT_IMAGE_NONE (0): keep images, draw black fill on top.
+                # PDF_REDACT_IMAGE_REMOVE (1) would delete the entire page image
+                # on scanned/OCR PDFs, leaving a blank white page.
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
         output_bytes = doc.tobytes(deflate=True)
     finally:
