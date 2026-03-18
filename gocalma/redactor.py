@@ -226,6 +226,52 @@ def page_count(pdf_bytes: bytes) -> int:
         doc.close()
 
 
+def detect_redaction_mode(pdf_bytes: bytes, mapping: dict) -> str:
+    """Check whether a redacted PDF uses reversible annotations or permanent redaction.
+
+    Returns ``"reversible"`` if annotations matching mapping labels are found,
+    ``"permanent"`` otherwise.
+    """
+    labels = {k for k in mapping if not k.startswith("__")}
+    if not labels:
+        return "permanent"
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            annot = page.first_annot
+            while annot:
+                if annot.info.get("content", "") in labels:
+                    return "reversible"
+                annot = annot.next
+        return "permanent"
+    finally:
+        doc.close()
+
+
+def unredact_pdf(pdf_bytes: bytes, mapping: dict) -> tuple[bytes, int]:
+    """Remove redaction annotations matching mapping labels from a reversible-mode PDF.
+
+    Returns ``(restored_pdf_bytes, num_annotations_removed)``.
+    """
+    labels = {k for k in mapping if not k.startswith("__")}
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    removed = 0
+    try:
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            annot = page.first_annot
+            while annot:
+                next_annot = annot.next
+                if annot.info.get("content", "") in labels:
+                    page.delete_annot(annot)
+                    removed += 1
+                annot = next_annot
+        return doc.tobytes(deflate=True), removed
+    finally:
+        doc.close()
+
+
 def extract_words(
     pdf_bytes: bytes,
     page_num: int,

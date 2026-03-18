@@ -17,6 +17,8 @@ from gocalma.redactor import (
     render_page,
     extract_words,
     _flatten_page_as_image,
+    detect_redaction_mode,
+    unredact_pdf,
 )
 
 
@@ -315,4 +317,95 @@ class TestFlattenPage:
         page = doc[0]
         assert abs(page.rect.width - 400) < 1
         assert abs(page.rect.height - 600) < 1
+        doc.close()
+
+
+# ---------------------------------------------------------------------------
+# detect_redaction_mode
+# ---------------------------------------------------------------------------
+
+class TestDetectRedactionMode:
+    def test_detect_reversible_mode(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, mapping = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        assert detect_redaction_mode(redacted, mapping) == "reversible"
+
+    def test_detect_permanent_mode(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, mapping = redact_pdf(pdf, [ent], approach="replace", flatten=True)
+        assert detect_redaction_mode(redacted, mapping) == "permanent"
+
+    def test_detect_no_matching_annotations(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, _ = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        wrong_mapping = {"[PERSON_xxxxxx]": "Nobody"}
+        assert detect_redaction_mode(redacted, wrong_mapping) == "permanent"
+
+
+# ---------------------------------------------------------------------------
+# unredact_pdf
+# ---------------------------------------------------------------------------
+
+class TestUnredactPdf:
+    def test_unredact_removes_annotations(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, mapping = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        restored, _ = unredact_pdf(redacted, mapping)
+        doc = fitz.open(stream=restored, filetype="pdf")
+        annots = list(doc[0].annots() or [])
+        assert len(annots) == 0
+        doc.close()
+
+    def test_unredact_restores_text(self):
+        pdf = _make_pdf("John Smith lives here")
+        ent = _make_entity(text="John Smith")
+        redacted, mapping = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        restored, _ = unredact_pdf(redacted, mapping)
+        doc = fitz.open(stream=restored, filetype="pdf")
+        text = doc[0].get_text("text")
+        assert "John Smith" in text
+        doc.close()
+
+    def test_unredact_returns_correct_count(self):
+        pdf = _make_pdf("John Smith lives at Musterstrasse 1")
+        ent1 = _make_entity(text="John Smith", start=0)
+        ent2 = PIIEntity("LOCATION", "Musterstrasse 1", 19, 35, 0.9, page_num=0)
+        redacted, mapping = redact_pdf(pdf, [ent1, ent2], approach="replace", flatten=False)
+        _, removed = unredact_pdf(redacted, mapping)
+        assert removed >= 2
+
+    def test_unredact_preserves_unrelated_annotations(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, mapping = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        # Add an unrelated annotation
+        doc = fitz.open(stream=redacted, filetype="pdf")
+        page = doc[0]
+        page.add_text_annot((10, 10), "User note")
+        modified = doc.tobytes()
+        doc.close()
+        restored, _ = unredact_pdf(modified, mapping)
+        doc = fitz.open(stream=restored, filetype="pdf")
+        annots = list(doc[0].annots() or [])
+        assert len(annots) == 1  # only the user note survives
+        doc.close()
+
+    def test_unredact_empty_mapping(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, _ = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        restored, removed = unredact_pdf(redacted, {})
+        assert removed == 0
+
+    def test_unredact_produces_valid_pdf(self):
+        pdf = _make_pdf()
+        ent = _make_entity()
+        redacted, mapping = redact_pdf(pdf, [ent], approach="replace", flatten=False)
+        restored, _ = unredact_pdf(redacted, mapping)
+        doc = fitz.open(stream=restored, filetype="pdf")
+        assert len(doc) == 1
         doc.close()

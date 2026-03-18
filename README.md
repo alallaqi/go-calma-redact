@@ -194,6 +194,21 @@ All approaches store the original text in the encrypted key file.
 
 ![Reverse redaction and passphrase protection](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.01.png)
 
+## De-redaction (Reverse Redaction)
+
+GoCalma can reverse redactions when the PDF was processed in **reversible mode**. Upload the redacted PDF together with its `.gocalma` key file to restore the original document.
+
+| Mode | What happens |
+|---|---|
+| **Reversible** | Annotations are removed and the original PDF is restored for download |
+| **Permanent** | Original text was destroyed — only the redaction mapping (JSON) is shown for reference |
+
+The mode is auto-detected: if the PDF contains annotation overlays matching the key file labels, it's reversible. If the text layer was flattened/destroyed, it's permanent.
+
+![Reversible de-redaction — original restored](assets/readme-assets/Screenshot%202026-03-18%20at%2006.22.59.png)
+
+![Permanent de-redaction — mapping reference only](assets/readme-assets/Screenshot%202026-03-18%20at%2006.22.08.png)
+
 ## OCR Pipeline
 
 For image-only or scanned PDFs, GoCalma automatically runs OCR:
