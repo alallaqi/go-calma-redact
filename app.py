@@ -37,15 +37,15 @@ _warning_collector.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 logging.getLogger("gocalma").addHandler(_warning_collector)
 
 from gocalma.pdf_extract import extract_text
-from gocalma.pii_detect import detect_pii_all_pages, PIIEntity, NLP_MODELS, DEFAULT_MODEL, available_models
-from gocalma.llm_detect import llm_verify_all_pages, LLM_MODELS, is_llm_available
+from gocalma.pii_detect import detect_pii_all_pages, PIIEntity
+from gocalma.llm_detect import (
+    is_available as is_llm_available,
+    verify_entities as llm_verify_entities,
+    classify_document,
+)
+from gocalma.summariser import build_summary
+from gocalma.audit import create_audit, audit_to_bytes
 
-# HuggingFace repo IDs for each local transformers model (used in download hints).
-_HF_IDS: dict[str, str] = {
-    "Mistral-7B-Instruct (local)":   "mistralai/Mistral-7B-Instruct-v0.3",
-    "Phi-3.5-mini-Instruct (local)": "microsoft/Phi-3.5-mini-instruct",
-    "Qwen2.5-1.5B-Instruct (local)": "Qwen/Qwen2.5-1.5B-Instruct",
-}
 from gocalma.redactor import (
     redact_pdf, render_page, render_preview, page_count,
     extract_words, map_words_to_entities,
@@ -366,6 +366,20 @@ with st.sidebar:
     st.caption("Local PII redaction for PDFs")
     st.divider()
 
+    # -- Status bar (always visible at top) ----------------------------------
+    st.markdown("**NER:** Multilingual BERT (DE/FR/IT/ES/EN)")
+    if is_llm_available():
+        st.markdown(
+            "<span style='color:#27ae60;font-weight:600'>LLM verification: Active &#10003;</span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<span style='color:rgba(255,255,255,0.45)'>LLM verification: Not available</span>",
+            unsafe_allow_html=True,
+        )
+    st.divider()
+
     app_mode = st.radio(
         "Mode",
         options=["Redact", "De-redact"],
@@ -375,68 +389,6 @@ with st.sidebar:
     )
 
     if app_mode == "Redact":
-        st.divider()
-
-        st.subheader("NER model")
-        installed = available_models()
-        all_keys = list(NLP_MODELS.keys())
-        selected_model = st.selectbox(
-            "NER model package",
-            options=all_keys,
-            index=all_keys.index(DEFAULT_MODEL),
-            format_func=lambda k: k if k in installed else f"{k}  (not installed)",
-            key="ner_model",
-        )
-        if selected_model not in installed:
-            engine_name = NLP_MODELS[selected_model]["engine_name"]
-            if engine_name == "swissbert":
-                st.warning(
-                    "SwissBERT-NER model weights not found in cache (~500 MB).\n\n"
-                    "**Download:**\n"
-                    "```\npython -c \""
-                    "from transformers import pipeline; "
-                    "pipeline('token-classification', model='ZurichNLP/swissbert-ner')"
-                    "\"\n```"
-                )
-            else:
-                st.warning(
-                    f"Install the **{engine_name}** package to use this model:\n\n"
-                    f"`pip install {engine_name}`"
-                )
-
-        st.divider()
-
-        st.subheader("LLM detector")
-        llm_options = ["None"] + list(LLM_MODELS.keys())
-        selected_llm = st.selectbox(
-            "LLM detector",
-            options=llm_options,
-            index=0,
-            key="llm_model",
-        )
-        if selected_llm != "None":
-            cfg = LLM_MODELS[selected_llm]
-            speed = cfg.get("speed", "")
-            if is_llm_available(selected_llm):
-                st.caption(
-                    f"Verifies NER findings + catches missed PII.  \n"
-                    f"{speed} — NER runs first for instant results."
-                )
-            elif cfg.get("backend") == "ollama":
-                st.warning(
-                    f"Ollama is not running or **{cfg['model']}** is not pulled.\n\n"
-                    "**Setup:**\n"
-                    f"```\nbrew install ollama\nollama serve\nollama pull {cfg['model']}\n```"
-                )
-            else:
-                hf_id = _HF_IDS.get(selected_llm, Path(cfg["path"]).name)
-                st.warning(
-                    f"Model weights not found.\n\n"
-                    "**Download:**\n"
-                    f"```\nhuggingface-cli download {hf_id}"
-                    f" --local-dir {cfg['path']}\n```"
-                )
-
         st.divider()
 
         st.subheader("De-identification approach")
@@ -481,7 +433,7 @@ with st.sidebar:
             "2. Text is extracted (+ OCR)\n"
             "3. PII is detected locally\n"
             "4. Review & approve findings\n"
-            "5. Download redacted PDF\n"
+            "5. Download redacted PDF + audit log\n"
         )
 
     if app_mode == "De-redact":
@@ -497,6 +449,34 @@ with st.sidebar:
 
     st.divider()
     st.markdown("Everything runs **locally**.  \nNo data leaves your machine.")
+
+    # -- Advanced expander (bottom of sidebar) -------------------------------
+    with st.expander("Advanced", expanded=False):
+        st.caption("Default settings work best for most documents.")
+        st.divider()
+
+        from gocalma.pii_detect import NLP_MODELS, DEFAULT_MODEL, available_models
+        st.markdown("**NER backend** *(for experts)*")
+        installed = available_models()
+        all_ner_keys = list(NLP_MODELS.keys())
+        st.selectbox(
+            "NER model",
+            options=all_ner_keys,
+            index=all_ner_keys.index(DEFAULT_MODEL) if DEFAULT_MODEL in all_ner_keys else 0,
+            format_func=lambda k: k if k in installed else f"{k}  (not installed)",
+            key="ner_model_advanced",
+            label_visibility="collapsed",
+        )
+
+        st.divider()
+        st.markdown("**LLM backend** *(for experts)*")
+        if is_llm_available():
+            st.success("Ollama + qwen2.5:0.5b ready")
+        else:
+            st.warning(
+                "Ollama not running or model not pulled.\n\n"
+                "```\nbrew install ollama\nollama serve\nollama pull qwen2.5:0.5b\n```"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -638,24 +618,29 @@ else:
             total = len(pages)
             st.info(f"Extracted text from **{total}** page(s) ({ocr_pages} via OCR).")
 
-            model_key = st.session_state.get("ner_model", DEFAULT_MODEL)
-            if model_key not in available_models():
-                st.error(
-                    f"**{model_key}** is not installed. "
-                    "Please select an installed model from the sidebar."
-                )
-                st.stop()
+            # Step 1: Regex + multilingual BERT NER
+            with st.spinner("Detecting PII with regex + multilingual BERT NER..."):
+                entities = detect_pii_all_pages(pages)
+            st.info(f"NER found **{len(entities)}** entities.")
 
-            with st.spinner(f"Detecting PII with **{model_key}**..."):
-                ner_entities = detect_pii_all_pages(pages, model_key=model_key)
+            # Step 2: LLM verification (if Ollama available)
+            doc_type = "general"
+            if is_llm_available():
+                with st.spinner("Classifying document type..."):
+                    doc_type = classify_document(pages)
+                st.info(f"Document classified as **{doc_type}**")
+                st.session_state.doc_type = doc_type
 
-            llm_key = st.session_state.get("llm_model", "None")
-            if llm_key != "None" and is_llm_available(llm_key):
-                st.info(f"NER found **{len(ner_entities)}** entities. Running LLM verification...")
-                with st.spinner(f"Verifying with **{llm_key}** (this may take 30-60s)..."):
-                    entities = llm_verify_all_pages(pages, ner_entities, model_key=llm_key)
-            else:
-                entities = ner_entities
+                with st.spinner("LLM verifying entities with qwen2.5:0.5b..."):
+                    for page in pages:
+                        page_ents = [e for e in entities if e.page_num == page.page_num]
+                        verified, ran = llm_verify_entities(
+                            page_ents, page.text, page_num=page.page_num, doc_type=doc_type,
+                        )
+                        if ran:
+                            # Replace page entities with verified versions
+                            entities = [e for e in entities if e.page_num != page.page_num] + verified
+                    entities.sort(key=lambda e: (e.page_num, e.start))
 
             disputed = [e for e in entities if "false positive" in e.analysis.lower()]
             llm_new = [e for e in entities if e.source == "LLM"]
@@ -670,6 +655,12 @@ else:
             # Surface any warnings from OCR / NER / LLM modules.
             detection_warnings = _warning_collector.flush_warnings()
             ocr_failed = sum(1 for p in pages if p.is_ocr and not p.text.strip())
+
+            # -- Risk summary --
+            risk = build_summary([
+                {"type": e.entity_type} for e in entities
+            ])
+            st.session_state.risk_summary = risk
 
             summary = f"Found **{len(entities)}** potential PII entities"
             if disputed or llm_new:
@@ -694,7 +685,7 @@ else:
             st.session_state.step = "upload"
             st.error(
                 f"Processing failed: {_sanitize_error(exc)}\n\n"
-                "Please check that the selected NER model is fully installed, "
+                "Please check that the NER model is installed (pip install transformers), "
                 "then try uploading the file again."
             )
 
@@ -785,6 +776,36 @@ else:
                     st.session_state.approved.append(True)
 
                 st.rerun()
+
+        # -- Risk summary (above entity table) ----------------------------------
+        risk = st.session_state.get("risk_summary")
+        if risk:
+            sev = risk["severity"]
+            if sev == "critical":
+                _bg, _prefix = "#e74c3c", "CRITICAL — "
+                _fg = "#fff"
+            elif sev == "moderate":
+                _bg, _prefix = "#f39c12", ""
+                _fg = "#000"
+            else:
+                _bg, _prefix = "#27ae60", ""
+                _fg = "#fff"
+
+            pills_html = ""
+            for ct in risk.get("critical_types_found", []):
+                pills_html += (
+                    f"<span style='display:inline-block;background:rgba(255,255,255,0.25);"
+                    f"color:{_fg};padding:2px 8px;border-radius:12px;font-size:0.7rem;"
+                    f"font-weight:600;margin-right:4px;margin-top:6px'>{ct}</span>"
+                )
+
+            st.markdown(
+                f"<div style='background:{_bg};color:{_fg};padding:1rem 1.2rem;"
+                f"border-radius:10px;margin-bottom:1rem'>"
+                f"<strong>{_prefix}</strong>{risk['sentence']}"
+                f"<br>{pills_html}</div>",
+                unsafe_allow_html=True,
+            )
 
         # -- Entity table (below the cards) ------------------------------------
         st.divider()
@@ -941,7 +962,22 @@ else:
         is_flatten = st.session_state.get("is_flatten", True)
 
         _stem = st.session_state.get("pdf_name", "document.pdf").rsplit(".", 1)[0]
-        col1, col2 = st.columns(2)
+        _pdf_name = st.session_state.get("pdf_name", "document.pdf")
+
+        # -- Build audit record --
+        entities = st.session_state.entities or []
+        approved = st.session_state.approved or []
+        selected = [ent for ent, ok in zip(entities, approved) if ok]
+        approach = st.session_state.get("deid_approach", DEFAULT_APPROACH)
+        audit_record = create_audit(
+            entities=selected,
+            action_taken=approach,
+            model_used="Davlan/bert-base-multilingual-cased-ner-hrl",
+            llm_used=is_llm_available(),
+            filename=_pdf_name,
+        )
+
+        col1, col2, col3 = st.columns(3)
         col1.download_button(
             "Download Redacted PDF",
             data=redacted_bytes,
@@ -954,6 +990,13 @@ else:
             data=st.session_state.key_blob,
             file_name=f"{_stem}_redaction_key.gocalma",
             mime="application/octet-stream",
+            use_container_width=True,
+        )
+        col3.download_button(
+            "Download Audit Log (.json)",
+            data=audit_to_bytes(audit_record),
+            file_name=f"{_stem}_audit.json",
+            mime="application/json",
             use_container_width=True,
         )
 
