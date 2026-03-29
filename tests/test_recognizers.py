@@ -125,3 +125,59 @@ def test_short_code_not_matched_as_insurance():
     hits = run_regex("Premium region BE 3")
     insurance_hits = [h for h in hits if h["type"] == "INSURANCE_NUMBER"]
     assert len(insurance_hits) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — Confidence score computation
+# ---------------------------------------------------------------------------
+
+def test_regex_entity_always_scores_1():
+    from gocalma.pii_detect import compute_confidence
+    entity = {
+        "text": "756.1234.5678.90", "type": "CH_AHV",
+        "source": "regex", "score": 0.5, "start": 0, "end": 16,
+    }
+    assert compute_confidence(entity, "AHV: 756.1234.5678.90") == 1.0
+
+
+def test_person_name_gets_floor_score():
+    from gocalma.pii_detect import compute_confidence
+    entity = {
+        "text": "Charles Muster", "type": "PERSON",
+        "source": "ner", "score": 0.20, "start": 10, "end": 24,
+    }
+    # Even with raw score of 0.20, floor + length + context
+    # should bring it well above 0.80
+    result = compute_confidence(
+        entity,
+        "xxxxxxxxx Mr Charles Muster, insurance no. 100 452 956",
+    )
+    assert result >= 0.80
+
+
+def test_repeated_name_scores_higher():
+    from gocalma.pii_detect import compute_confidence
+    entity = {
+        "text": "Charles Muster", "type": "PERSON",
+        "source": "ner", "score": 0.50, "start": 0, "end": 14,
+    }
+    repeated_doc = "Charles Muster " * 5
+    result = compute_confidence(entity, repeated_doc)
+    # Repetition boost should apply
+    assert result >= 0.90
+
+
+def test_person_cannot_be_disputed_by_llm():
+    """apply_llm_verdict must override LLM false_positive for PERSON type."""
+    from gocalma.llm_detect import apply_llm_verdict
+    entity = {"text": "Max Muster", "type": "PERSON", "source": "ner"}
+    result = apply_llm_verdict(entity, "FALSE_POSITIVE", "seems generic")
+    assert result["llm_status"] == "confirmed"
+
+
+def test_regex_entity_cannot_be_disputed():
+    """apply_llm_verdict must override LLM false_positive for regex-sourced entities."""
+    from gocalma.llm_detect import apply_llm_verdict
+    entity = {"text": "756.1234.5678.90", "type": "CH_AHV", "source": "regex"}
+    result = apply_llm_verdict(entity, "FALSE_POSITIVE", "not PII")
+    assert result["llm_status"] == "confirmed"

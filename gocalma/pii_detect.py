@@ -21,7 +21,6 @@ _log = logging.getLogger(__name__)
 # Single NER model — loaded once on first call
 # ---------------------------------------------------------------------------
 
-_NER_MODEL_ID = "Davlan/bert-base-multilingual-cased-ner-hrl"
 _NER_LABEL_MAP: dict[str, str] = {
     "PER": "PERSON",
     "LOC": "LOCATION",
@@ -30,37 +29,67 @@ _NER_LABEL_MAP: dict[str, str] = {
 }
 
 _ner_pipe = None
+_ner_pipe_model: str | None = None
 _ner_pipe_lock = threading.Lock()
+
+# Currently selected NER model — changed via set_ner_model()
+_active_ner_model: str = "Davlan/bert-base-multilingual-cased-ner-hrl"
 
 
 def _get_ner_pipe():
-    """Lazily load the multilingual NER pipeline (thread-safe singleton)."""
-    global _ner_pipe
-    if _ner_pipe is None:
+    """Lazily load the NER pipeline for the active model (thread-safe singleton)."""
+    global _ner_pipe, _ner_pipe_model
+    if _ner_pipe is None or _ner_pipe_model != _active_ner_model:
         with _ner_pipe_lock:
-            if _ner_pipe is None:
+            if _ner_pipe is None or _ner_pipe_model != _active_ner_model:
                 from transformers import pipeline
                 _ner_pipe = pipeline(
                     "ner",
-                    model=_NER_MODEL_ID,
+                    model=_active_ner_model,
                     aggregation_strategy="simple",
                 )
+                _ner_pipe_model = _active_ner_model
     return _ner_pipe
 
 
+def set_ner_model(model_id: str) -> None:
+    """Set the active NER model. Takes effect on the next _get_ner_pipe() call."""
+    global _active_ner_model
+    if model_id in NLP_MODELS:
+        _active_ner_model = model_id
+
+
+def get_ner_model() -> str:
+    """Return the currently active NER model ID."""
+    return _active_ner_model
+
+
 # Backward-compat exports — other modules import these names.
-DEFAULT_MODEL = _NER_MODEL_ID
+DEFAULT_MODEL = "Davlan/bert-base-multilingual-cased-ner-hrl"
 NLP_MODELS: dict[str, dict] = {
-    _NER_MODEL_ID: {
+    "Davlan/bert-base-multilingual-cased-ner-hrl": {
         "engine_name": "transformers",
-        "model_name": _NER_MODEL_ID,
+        "model_name": "Davlan/bert-base-multilingual-cased-ner-hrl",
         "lang_codes": ["de", "fr", "it", "en", "es", "pt", "nl"],
+        "description": "Multilingual BERT — best all-round (7 languages)",
+    },
+    "dslim/bert-base-NER": {
+        "engine_name": "transformers",
+        "model_name": "dslim/bert-base-NER",
+        "lang_codes": ["en"],
+        "description": "English-only BERT NER — faster, English docs only",
+    },
+    "Davlan/xlm-roberta-large-ner-hrl": {
+        "engine_name": "transformers",
+        "model_name": "Davlan/xlm-roberta-large-ner-hrl",
+        "lang_codes": ["de", "fr", "it", "en", "es", "pt", "nl"],
+        "description": "XLM-RoBERTa Large — highest accuracy, slower",
     },
 }
 
 
 def available_models() -> dict[str, dict]:
-    """Return available NER models (always the single multilingual model)."""
+    """Return NER models whose transformers backend is installed."""
     try:
         import transformers  # noqa: F401
         return dict(NLP_MODELS)
@@ -165,6 +194,69 @@ def is_contextual_false_positive(entity: dict, full_page_text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Computed confidence score
+# ---------------------------------------------------------------------------
+
+_PII_CONTEXT_KEYWORDS = [
+    "insurance no", "policyholder", "date of birth", "geboren",
+    "versicherte", "assuré", "policy", "mr", "mrs", "ms", "herr",
+    "frau", "insured", "customer", "client",
+]
+
+_TYPE_FLOORS: dict[str, float] = {
+    "PERSON": 0.80,
+    "DATE_OF_BIRTH": 0.85,
+    "EMAIL_ADDRESS": 0.95,
+    "EMAIL": 0.95,
+    "PHONE_NUMBER": 0.80,
+    "PHONE_INTL": 0.80,
+    "LOCATION": 0.60,
+    "ORGANIZATION": 0.55,
+    "ORG": 0.55,
+}
+
+
+def compute_confidence(entity: dict, full_text: str) -> float:
+    """Return a 0.0–1.0 confidence score reflecting actual PII likelihood.
+
+    Unlike the raw NER token probability, this accounts for source,
+    entity type, span length, surrounding context, and repetition.
+    """
+    score = entity.get("score", 0.5)
+    entity_type = entity["type"]
+    text = entity["text"].strip()
+
+    # 1. SOURCE BOOST — regex is deterministic, always certain
+    if entity.get("source") == "regex":
+        return 1.0
+
+    # 2. TYPE FLOOR — certain types are always high confidence if NER found them
+    floor = _TYPE_FLOORS.get(entity_type, 0.50)
+    score = max(score, floor)
+
+    # 3. LENGTH BOOST — longer spans are more likely correct
+    word_count = len(text.split())
+    if word_count >= 3:
+        score = min(score + 0.15, 1.0)
+    elif word_count == 2:
+        score = min(score + 0.10, 1.0)
+
+    # 4. CONTEXT BOOST — entity appears near known PII keywords
+    start = max(0, entity.get("start", 0) - 80)
+    end = min(len(full_text), entity.get("end", 0) + 80)
+    surrounding = full_text[start:end].lower()
+    if any(kw in surrounding for kw in _PII_CONTEXT_KEYWORDS):
+        score = min(score + 0.10, 1.0)
+
+    # 5. REPETITION SIGNAL — 3+ occurrences = almost certainly the subject
+    occurrences = full_text.lower().count(text.lower())
+    if occurrences >= 3:
+        score = min(score + 0.10, 1.0)
+
+    return round(score, 2)
+
+
+# ---------------------------------------------------------------------------
 # Core detection
 # ---------------------------------------------------------------------------
 
@@ -230,6 +322,10 @@ def detect_pii(
     # Step 5: remove implausibly short / trivial entities
     merged = filter_implausible(merged)
 
+    # Step 5b: compute confidence scores
+    for hit in merged:
+        hit["confidence"] = compute_confidence(hit, text)
+
     # Step 6: convert to PIIEntity
     entities: list[PIIEntity] = []
     for hit in merged:
@@ -238,7 +334,7 @@ def detect_pii(
             text=hit["text"],
             start=hit["start"],
             end=hit["end"],
-            score=hit.get("priority", 5) / 10.0,  # normalise priority to 0-1 score
+            score=hit["confidence"],
             page_num=page_num,
             source=hit.get("source", "regex"),
             analysis=f"{hit.get('source', 'regex')} | {hit['type']}",

@@ -19,26 +19,38 @@ from gocalma.pii_detect import PIIEntity
 # Ollama configuration
 # ---------------------------------------------------------------------------
 
-_OLLAMA_MODEL = "qwen2.5:0.5b"
 _OLLAMA_BASE_URL = "http://localhost:11434"
 _OLLAMA_TIMEOUT = 2  # seconds for connectivity check
 
+# Currently selected Ollama model
+_active_llm_model: str = "qwen2.5:0.5b"
+
 # Module-level availability flag — set once at import time.
 LLM_AVAILABLE: bool = False
+_OLLAMA_MODELS: list[str] = []  # populated by _check_ollama
+
 
 def _check_ollama() -> bool:
-    """Return True if Ollama is reachable and the model is pulled."""
+    """Return True if Ollama is reachable and has at least one model pulled."""
+    global _OLLAMA_MODELS
     try:
         import urllib.request
         req = urllib.request.Request(f"{_OLLAMA_BASE_URL}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=_OLLAMA_TIMEOUT) as resp:
             data = json.loads(resp.read())
-        base_name = _OLLAMA_MODEL.split(":")[0]
-        for m in data.get("models", []):
-            if m.get("name", "").split(":")[0] == base_name:
+        _OLLAMA_MODELS = [m["name"] for m in data.get("models", []) if m.get("name")]
+        if not _OLLAMA_MODELS:
+            _log.info("Ollama running but no models pulled")
+            return False
+        # Check if the active model is available
+        base_name = _active_llm_model.split(":")[0]
+        for m in _OLLAMA_MODELS:
+            if m.split(":")[0] == base_name:
                 return True
-        _log.info("Ollama running but model %r not pulled", _OLLAMA_MODEL)
-        return False
+        # Active model not found, but others are — still available
+        _log.info("Active model %r not pulled, but %d other model(s) available",
+                   _active_llm_model, len(_OLLAMA_MODELS))
+        return True
     except Exception as exc:
         _log.debug("Ollama not available: %s", exc)
         return False
@@ -49,8 +61,24 @@ LLM_AVAILABLE = _check_ollama()
 
 
 def is_available() -> bool:
-    """Return True if the LLM backend (Ollama + model) is ready."""
+    """Return True if the LLM backend (Ollama) is ready."""
     return LLM_AVAILABLE
+
+
+def list_ollama_models() -> list[str]:
+    """Return the list of Ollama models discovered at startup."""
+    return list(_OLLAMA_MODELS)
+
+
+def get_llm_model() -> str:
+    """Return the currently active LLM model name."""
+    return _active_llm_model
+
+
+def set_llm_model(model_name: str) -> None:
+    """Set the active LLM model used for verification and classification."""
+    global _active_llm_model
+    _active_llm_model = model_name
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +341,7 @@ _VERIFY_PROMPT = _build_verify_prompt("general")
 def _call_ollama(messages: list[dict]) -> str:
     """Send *messages* to the local Ollama daemon and return the reply text."""
     import ollama as _ollama
-    resp = _ollama.chat(model=_OLLAMA_MODEL, messages=messages)
+    resp = _ollama.chat(model=_active_llm_model, messages=messages)
     return resp["message"]["content"]
 
 
@@ -581,7 +609,6 @@ def verify_entities(
     to_verify: list[PIIEntity] = []
     for ent in page_ents:
         if _is_protected(ent):
-            ent.analysis = "protected — not sent to LLM"
             protected.append(ent)
         else:
             to_verify.append(ent)
@@ -632,7 +659,8 @@ def verify_entities(
         result = apply_llm_verdict(ent_dict, verdict.upper(), reason)
 
         if result["llm_status"] == "false_positive":
-            ent.score = min(ent.score, 0.2)
+            # Confidence score is independent of LLM verdict — do not lower it.
+            # The llm_status flag is a separate advisory signal shown in the UI.
             ent.analysis = f"review: {result['llm_note']}" if result["llm_note"] else "review"
         else:
             ent.analysis = "LLM verified"

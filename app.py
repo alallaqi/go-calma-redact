@@ -42,6 +42,7 @@ from gocalma.llm_detect import (
     is_available as is_llm_available,
     verify_entities as llm_verify_entities,
     classify_document,
+    list_ollama_models, get_llm_model, set_llm_model,
 )
 from gocalma.summariser import build_summary
 from gocalma.audit import create_audit, audit_to_bytes
@@ -455,26 +456,55 @@ with st.sidebar:
         st.caption("Default settings work best for most documents.")
         st.divider()
 
-        from gocalma.pii_detect import NLP_MODELS, DEFAULT_MODEL, available_models
-        st.markdown("**NER backend** *(for experts)*")
+        from gocalma.pii_detect import (
+            NLP_MODELS, DEFAULT_MODEL, available_models,
+            set_ner_model, get_ner_model,
+        )
+        st.markdown("**NER model**")
         installed = available_models()
         all_ner_keys = list(NLP_MODELS.keys())
-        st.selectbox(
+        current_ner = get_ner_model()
+        ner_idx = all_ner_keys.index(current_ner) if current_ner in all_ner_keys else 0
+        selected_ner = st.selectbox(
             "NER model",
             options=all_ner_keys,
-            index=all_ner_keys.index(DEFAULT_MODEL) if DEFAULT_MODEL in all_ner_keys else 0,
-            format_func=lambda k: k if k in installed else f"{k}  (not installed)",
+            index=ner_idx,
+            format_func=lambda k: (
+                NLP_MODELS[k].get("description", k)
+                if k in installed
+                else f"{NLP_MODELS[k].get('description', k)}  ⚠ not installed"
+            ),
             key="ner_model_advanced",
             label_visibility="collapsed",
         )
+        if selected_ner != current_ner:
+            set_ner_model(selected_ner)
 
         st.divider()
-        st.markdown("**LLM backend** *(for experts)*")
+        st.markdown("**LLM model** *(Ollama)*")
         if is_llm_available():
-            st.success("Ollama + qwen2.5:0.5b ready")
+            ollama_models = list_ollama_models()
+            current_llm = get_llm_model()
+            if ollama_models:
+                llm_idx = (
+                    ollama_models.index(current_llm)
+                    if current_llm in ollama_models
+                    else 0
+                )
+                selected_llm = st.selectbox(
+                    "LLM model",
+                    options=ollama_models,
+                    index=llm_idx,
+                    key="llm_model_advanced",
+                    label_visibility="collapsed",
+                )
+                if selected_llm != current_llm:
+                    set_llm_model(selected_llm)
+            else:
+                st.info(f"Using **{current_llm}**")
         else:
             st.warning(
-                "Ollama not running or model not pulled.\n\n"
+                "Ollama not running or no models pulled.\n\n"
                 "```\nbrew install ollama\nollama serve\nollama pull qwen2.5:0.5b\n```"
             )
 
@@ -631,7 +661,7 @@ else:
                 st.info(f"Document classified as **{doc_type}**")
                 st.session_state.doc_type = doc_type
 
-                with st.spinner("LLM verifying entities with qwen2.5:0.5b..."):
+                with st.spinner(f"LLM verifying entities with {get_llm_model()}..."):
                     for page in pages:
                         page_ents = [e for e in entities if e.page_num == page.page_num]
                         verified, ran = llm_verify_entities(
@@ -642,12 +672,14 @@ else:
                             entities = [e for e in entities if e.page_num != page.page_num] + verified
                     entities.sort(key=lambda e: (e.page_num, e.start))
 
-            disputed = [e for e in entities if "false positive" in e.analysis.lower()]
+            disputed = [e for e in entities if "review" in e.analysis.lower()]
             llm_new = [e for e in entities if e.source == "LLM"]
-            approved_defaults = [
-                "false positive" not in e.analysis.lower()
-                for e in entities
-            ]
+
+            # Sort entities by confidence descending so high-confidence PII appears first
+            entities.sort(key=lambda e: (-e.score, e.page_num, e.start))
+
+            # All entities are checked/active by default — llm_status is advisory only
+            approved_defaults = [True for _ in entities]
 
             st.session_state.entities = entities
             st.session_state.approved = approved_defaults
@@ -814,17 +846,17 @@ else:
         else:
             active_count = sum(approved)
             with st.expander(f"**Detected entities ({active_count} / {len(entities)} active)**", expanded=True):
-                col_header = st.columns([0.3, 1.5, 1.8, 0.6, 1.8, 0.6, 0.7])
+                col_header = st.columns([0.3, 1.5, 1.8, 0.6, 1.8, 0.6, 0.8])
                 col_header[0].markdown("<div class='review-header'>✓</div>", unsafe_allow_html=True)
                 col_header[1].markdown("<div class='review-header'>Entity</div>", unsafe_allow_html=True)
                 col_header[2].markdown("<div class='review-header'>Detected text</div>", unsafe_allow_html=True)
                 col_header[3].markdown("<div class='review-header'>Source</div>", unsafe_allow_html=True)
                 col_header[4].markdown("<div class='review-header'>Analysis</div>", unsafe_allow_html=True)
                 col_header[5].markdown("<div class='review-header'>Page</div>", unsafe_allow_html=True)
-                col_header[6].markdown("<div class='review-header'>Score</div>", unsafe_allow_html=True)
+                col_header[6].markdown("<div class='review-header'>Confidence</div>", unsafe_allow_html=True)
 
                 for i, ent in enumerate(entities):
-                    cols = st.columns([0.3, 1.5, 1.8, 0.6, 1.8, 0.6, 0.7])
+                    cols = st.columns([0.3, 1.5, 1.8, 0.6, 1.8, 0.6, 0.8])
                     approved[i] = cols[0].checkbox("", value=approved[i], key=f"chk_{i}", label_visibility="collapsed")
                     bg, fg = ENTITY_COLORS.get(ent.entity_type, (SLATE, WHITE))
                     cols[1].markdown(
@@ -838,15 +870,39 @@ else:
                         f"<span class='entity-badge' style='background:{src_bg};color:#fff'>{src}</span>",
                         unsafe_allow_html=True,
                     )
+                    # Analysis column: show LLM verdict as badge
                     analysis_text = getattr(ent, "analysis", "")
-                    is_disputed = "false positive" in analysis_text.lower()
-                    analysis_color = "#c0392b" if is_disputed else SLATE
-                    cols[4].markdown(
-                        f"<span style='font-size:0.75rem;color:{analysis_color}'>{analysis_text}</span>",
+                    if "review" in analysis_text.lower():
+                        cols[4].markdown(
+                            "<span style='font-size:0.75rem;background:#f39c12;color:#000;"
+                            "padding:2px 8px;border-radius:8px'>⚠ review</span>",
+                            unsafe_allow_html=True,
+                        )
+                    elif "verified" in analysis_text.lower():
+                        cols[4].markdown(
+                            f"<span style='font-size:0.75rem;color:#27ae60'>✓ verified</span>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        cols[4].markdown(
+                            f"<span style='font-size:0.75rem;color:{SLATE}'>{analysis_text}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    cols[5].caption(f"Page {ent.page_num + 1}")
+                    # Confidence column: colored bar with label
+                    if ent.score >= 0.90:
+                        conf_color, conf_label = "#27ae60", "High"
+                    elif ent.score >= 0.70:
+                        conf_color, conf_label = "#f39c12", "Medium"
+                    else:
+                        conf_color, conf_label = "#95a5a6", "Low"
+                    cols[6].markdown(
+                        f"<div style='background:#eee;border-radius:6px;overflow:hidden;height:18px;margin-top:4px'>"
+                        f"<div style='background:{conf_color};width:{ent.score*100:.0f}%;height:100%;"
+                        f"border-radius:6px;display:flex;align-items:center;justify-content:center;"
+                        f"font-size:0.65rem;color:#fff;font-weight:600'>{conf_label}</div></div>",
                         unsafe_allow_html=True,
                     )
-                    cols[5].caption(f"Page {ent.page_num + 1}")
-                    cols[6].progress(ent.score, text=f"{ent.score:.0%}")
 
                 st.session_state.approved = approved
 

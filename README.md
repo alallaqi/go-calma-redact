@@ -1,20 +1,222 @@
-# GoCalma Redact — Local PII Redaction for PDFs
+# GoCalma Redact 🔒
 
-GoCalma Redact lets you upload a PDF, automatically detect personal information (PII), interactively review what was found, and generate a redacted copy — all locally on your machine. No data ever leaves your computer.
+[![Live App](https://img.shields.io/badge/Live_App-PLACEHOLDER-blue?style=for-the-badge)](PLACEHOLDER)
+[![Demo Video](https://img.shields.io/badge/Demo_Video-PLACEHOLDER-red?style=for-the-badge)](PLACEHOLDER)
+[![GDPR Compliant](https://img.shields.io/badge/GDPR-Compliant-green?style=for-the-badge)]()
+[![Local AI](https://img.shields.io/badge/Local_AI-100%25_Offline-purple?style=for-the-badge)]()
+[![MIT License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
-## Features
+**Privacy-first PDF redaction with native Swiss document support, multilingual AI detection, and zero third-party data sharing.**
 
-- **100% local processing** — zero external API calls, all inference runs on-device
-- **Dual detection pipeline** — Microsoft Presidio NER + optional local LLM verification
-- **Swiss & European PII** — AHV/AVS, Zugangscodes, IBAN, DACH addresses, German dates, CH postal codes, Swiss reference IDs
-- **9 NER model backends** — spaCy (EN + DE + multilingual), HuggingFace Transformers, SwissBERT-NER, Stanza
-- **Multilingual OCR** — Surya (transformer-based, 90+ languages, recommended) or Tesseract fallback
-- **Language auto-detection** — each page routed to the correct NER language automatically
-- **7 de-identification approaches** — redact, replace, mask, hash, encrypt, highlight, synthesize
-- **Interactive PDF viewer** — hover and double-click words directly on the document to add/remove redactions (works on OCR pages too)
-- **Live side-by-side preview** — original and redacted views update in real time
-- **Reversible redactions** — encrypted `.gocalma` key file with optional PBKDF2 passphrase protection
-- **LLM verification** — Phi-3.5-mini, Mistral-7B, Qwen2.5, or Ollama models verify NER findings and catch missed PII
+The only redaction tool that covers AHV numbers, Zugangscodes, and Swiss IBANs natively — plus full GDPR audit trails and LLM verification that can never suppress real PII.
+
+---
+
+## Try It (2 Minutes)
+
+1. Open [Live App → PLACEHOLDER]
+2. Upload any PDF with personal information
+3. See detected PII with risk severity — **Critical** / **Moderate** / **Low**
+4. Review entities, toggle off any false positives
+5. Choose redaction mode and click **Redact**
+6. Download: redacted PDF + audit log (`.json`) + encrypted key (`.gocalma`)
+7. Restore: drag all three files back in to un-redact
+
+![Upload and side-by-side preview](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.32.png)
+
+---
+
+## What Makes This Different
+
+### Multilingual by Default
+
+Detects PII in English, German, French, Italian, Spanish, Portuguese, and Dutch using a single multilingual BERT model (`Davlan/bert-base-multilingual-cased-ner-hrl`). No model selection required. Language is detected automatically per page. Two additional NER models available in the Advanced panel: `dslim/bert-base-NER` (English-only, faster) and `Davlan/xlm-roberta-large-ner-hrl` (highest accuracy, slower).
+
+### Swiss-Native Patterns
+
+Built-in regex recognizers for AHV/AVS numbers (`756.XXXX.XXXX.XX`), Swiss IBANs (`CH56 0483 ...`), Zugangscodes (`ABCD-EFgh-IJKL-MNop`), CH postal codes, Swiss personal IDs, reference numbers, and insurance policy numbers — patterns that no other open-source redaction tool covers out of the box. All 24 regex patterns fire on every document regardless of language.
+
+### LLM That Only Adds, Never Removes
+
+An optional local LLM (any Ollama model — defaults to `qwen2.5:0.5b`) acts as a second pass to catch missed PII. Critically: it can never dispute a high-confidence detection. Person names, AHV numbers, IBANs, SSNs, credit cards, and dates of birth are protected types — the LLM cannot mark them as false positives under any circumstance. Regex-sourced entities are completely immune to LLM dispute. If Ollama isn't running, the LLM step is silently skipped.
+
+---
+
+## Detection Pipeline
+
+### Layer 1 — Regex (instant, deterministic)
+
+Always runs. Covers 24 compiled patterns across three tiers:
+
+| Tier | Entity Types |
+|------|-------------|
+| 🇨🇭 **Swiss** | AHV/AVS (dot and space formats), IBAN CH, Zugangscode, CH postal code, CH personal ID, CH reference ID (10–13 digits), insurance number (3-3-3 format) |
+| 🇪🇺 **European** | US SSN, UK National Insurance, UK postcode, German Steuer-ID, French NIR, Italian Codice Fiscale, Spanish DNI, Spanish NIE, ICAO passport number |
+| 🌍 **Universal** | Email, international phone (E.164), any-country IBAN, credit card (13–19 digits), IPv4 address, date of birth (DD.MM.YYYY and YYYY-MM-DD) |
+
+Priority: 10 (highest confidence, wins all merge conflicts). Source code: [`regex_patterns.py`](gocalma/regex_patterns.py).
+
+### Layer 2 — Multilingual BERT NER (fast, language-agnostic)
+
+| Setting | Value |
+|---------|-------|
+| Default model | `Davlan/bert-base-multilingual-cased-ner-hrl` |
+| Languages | EN, DE, FR, IT, ES, PT, NL |
+| Detects | PERSON, LOCATION, ORGANIZATION, DATE_TIME |
+| Priority | 6 (names), 5 (locations), 4 (organisations), 3 (dates) |
+| Max input | 4,500 characters (BERT 512-token limit) |
+
+Two alternative models selectable in Advanced: `dslim/bert-base-NER` (English-only) and `Davlan/xlm-roberta-large-ner-hrl` (XLM-RoBERTa Large). The pipeline lazily reloads when you switch. Source code: [`pii_detect.py`](gocalma/pii_detect.py).
+
+### Layer 3 — LLM Verification (optional, additive only)
+
+| Setting | Value |
+|---------|-------|
+| Backend | Ollama (local) |
+| Default model | `qwen2.5:0.5b` (~400 MB) |
+| Role | Find PII that regex and NER missed |
+| Cannot dispute | PERSON, DATE_OF_BIRTH, CH_AHV, US_SSN, IBAN_CH, IBAN_INTL, CREDIT_CARD, or any regex-sourced entity |
+| If unavailable | Skipped silently — NER results returned unchanged |
+
+The LLM selector in the Advanced panel shows every model you have pulled in Ollama. The verification prompt defaults to CONFIRMED and requires a reason for any FALSE_POSITIVE verdict. Source code: [`llm_detect.py`](gocalma/llm_detect.py).
+
+### Merge & Filter
+
+**Priority merge:** When two detection passes flag the same span, highest priority wins. AHV (10) beats phone (8) beats NER name (6). Two-pass deduplication: first by span overlap, then by text identity (case-insensitive).
+
+**False-positive filters** (applied automatically):
+
+| Filter | What it catches |
+|--------|----------------|
+| Minimum length | Entities under 3 characters discarded |
+| Context-aware location | "Switzerland" after "anywhere in" = product description, not an address |
+| Abbreviation tables | GIC, AIC, UVG-style codes near legend keywords |
+| Premium region codes | "BE 3", "ZH 1" near "premium region" |
+| Generic street names | "Bahnhofstrasse" alone → not a personal address (no house number) |
+
+**Confidence scoring** (replaces raw NER token probability):
+
+| Signal | Effect |
+|--------|--------|
+| Regex source | Always 1.0 (deterministic) |
+| Type floor | PERSON min 0.80, EMAIL min 0.95, PHONE min 0.80 |
+| Span length | 2 words +0.10, 3+ words +0.15 |
+| Context keywords | Near "policyholder", "Herr", "insurance no." → +0.10 |
+| Repetition | Same text 3+ times in document → +0.10 |
+
+Displayed as: **High** (green, ≥0.90) / **Medium** (amber, ≥0.70) / **Low** (gray, <0.70). Raw percentages are never shown. Source code: [`pii_detect.py:compute_confidence()`](gocalma/pii_detect.py).
+
+---
+
+## Supported Entity Types
+
+| Entity | Example | Source | Priority | Coverage |
+|--------|---------|--------|----------|----------|
+| CH_AHV | `756.1234.5678.90` | Regex | 10 | 🇨🇭 |
+| IBAN_CH | `CH56 0483 5012 3456 7800 9` | Regex | 10 | 🇨🇭 |
+| IBAN_INTL | `DE89 3704 0044 0532 0130 00` | Regex | 10 | 🌍 |
+| US_SSN | `123-45-6789` | Regex | 10 | 🌍 |
+| CREDIT_CARD | `4111-1111-1111-1111` | Regex | 10 | 🌍 |
+| CH_ZUGANGSCODE | `ABCD-EFgh-IJKL-MNop` | Regex | 9 | 🇨🇭 |
+| CH_ID_NUMBER | `12-3456-78` | Regex | 9 | 🇨🇭 |
+| CH_REFERENCE_ID | `100000000000` | Regex | 9 | 🇨🇭 |
+| INSURANCE_NUMBER | `100 452 956` | Regex | 9 | 🇨🇭 |
+| EMAIL | `info@example.ch` | Regex | 9 | 🌍 |
+| UK_NI | `AB123456C` | Regex | 9 | 🇪🇺 |
+| DE_STEUER_ID | `12345678901` | Regex | 9 | 🇪🇺 |
+| FR_NIR | `185081234567890` | Regex | 9 | 🇪🇺 |
+| IT_CODICE_FISCALE | `RSSMRA85M01H501Z` | Regex | 9 | 🇪🇺 |
+| ES_DNI | `12345678Z` | Regex | 9 | 🇪🇺 |
+| ES_NIE | `X1234567L` | Regex | 9 | 🇪🇺 |
+| ICAO_PASSPORT | `AB123456789` | Regex | 9 | 🌍 |
+| PHONE_INTL | `+41 79 123 45 67` | Regex | 8 | 🌍 |
+| IP_ADDRESS | `192.168.1.1` | Regex | 8 | 🌍 |
+| PERSON | `Max Mustermann` | NER | 6 | 🌍 |
+| UK_POSTCODE | `SW1A 1AA` | Regex | 5 | 🇪🇺 |
+| CH_POSTAL | `8003 Zürich` | Regex | 5 | 🇨🇭 |
+| LOCATION | `Zürich` | NER | 5 | 🌍 |
+| ORGANIZATION | `Helsana AG` | NER | 4 | 🌍 |
+| DATE_OF_BIRTH | `26.03.1975` | Regex | 3 | 🌍 |
+| DATE_TIME | `26. März 1975` | NER | 3 | 🌍 |
+
+Swiss-specific patterns fire on every document regardless of language.
+
+![Detected entities table](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.46.png)
+
+---
+
+## De-identification Modes
+
+| Approach | Visual result | Reversible | Notes |
+|----------|--------------|------------|-------|
+| **redact** | ████████ (black box) | Yes | Original text recoverable via key file |
+| **replace** | `<PERSON>` | Yes | Default mode |
+| **mask** | `****` | Yes | Length matches original |
+| **hash** | `[#a3f2c1...]` | Yes | Salted HMAC-SHA256, key stored in `.gocalma` |
+| **encrypt** | `[enc:PERSON_a3]` | Yes | Fernet-encrypted label |
+| **highlight** | Yellow highlight | Yes | Text stays visible |
+| **synthesize** | "John Doe", "redacted@example.com" | Yes | Synthetic placeholder per entity type |
+
+All approaches store the original text in the encrypted `.gocalma` key file. Source code: [`redactor.py`](gocalma/redactor.py).
+
+![De-identification approach selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.11.png)
+
+---
+
+## De-redaction (Reverse Redaction)
+
+Upload the redacted PDF together with its `.gocalma` key file. The mode is auto-detected:
+
+| Mode | What happens |
+|------|-------------|
+| **Reversible** | Annotations removed, original PDF restored for download |
+| **Permanent** | Text layer was destroyed — redaction mapping (JSON) shown for reference |
+
+![Reverse redaction and passphrase protection](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.01.png)
+
+![Reversible de-redaction — original restored](assets/readme-assets/Screenshot%202026-03-18%20at%2006.22.59.png)
+
+![Permanent de-redaction — mapping reference only](assets/readme-assets/Screenshot%202026-03-18%20at%2006.22.08.png)
+
+---
+
+## Privacy Architecture
+
+### 100% Local (default)
+
+Everything runs on your machine. Nothing leaves it.
+
+```bash
+streamlit run app.py
+# → http://localhost:8501
+```
+
+All AI models run locally:
+- **Multilingual BERT NER:** ~700 MB (downloads once on first use, cached in `~/.cache/huggingface`)
+- **Flan-T5 risk summariser:** 77 MB (downloads once)
+- **Qwen2.5 LLM** (optional): pulled via Ollama
+
+No external API calls. No telemetry. No network requests during processing.
+
+---
+
+## GDPR & Compliance
+
+| Feature | Detail |
+|---------|--------|
+| **Data residency** | 100% local — no data leaves your machine |
+| **Retention** | Zero — documents processed in memory only |
+| **Third-party APIs** | None — all inference is local (BERT, Flan-T5, Ollama) |
+| **Audit trail** | Timestamped JSON per redaction — entity types and counts only, no document content |
+| **Encryption** | AES-128-CBC + HMAC-SHA256 (Fernet) with PBKDF2 key derivation |
+| **Key derivation** | PBKDF2-HMAC-SHA256, 480,000 iterations (OWASP 2024 recommendation) |
+| **Upload cap** | 50 MB |
+| **Prompt injection guard** | Document content wrapped in `<document_content>` delimiters, model output validated |
+| **LLM failure mode** | Graceful — returns NER entities unchanged on any error |
+
+The audit log ([`audit.py`](gocalma/audit.py)) records: timestamp, SHA-256 filename hash, entity type counts with severity classification, redaction mode, and model used. No document content is ever stored.
+
+---
 
 ## Architecture
 
@@ -22,234 +224,60 @@ GoCalma Redact lets you upload a PDF, automatically detect personal information 
 flowchart TD
     Upload[Upload PDF] --> Extract[Extract text via PyMuPDF]
     Extract --> OCR{Page has text?}
-    OCR -->|Yes| NER[NER detection via Presidio]
+    OCR -->|Yes| Regex[Regex pass — 24 patterns]
     OCR -->|No| SuryaOCR[OCR via Surya / Tesseract]
-    SuryaOCR --> NER
-    NER --> LangDetect[Auto-detect page language]
-    LangDetect --> Entities[Entity list with analysis]
-    Entities --> LLMCheck{LLM enabled?}
+    SuryaOCR --> Regex
+    Regex --> NER[Multilingual BERT NER]
+    NER --> Merge[Merge + priority dedup + false-positive filters]
+    Merge --> Confidence[Compute confidence scores]
+    Confidence --> Risk[Risk summary — Flan-T5]
+    Risk --> LLMCheck{Ollama available?}
     LLMCheck -->|No| Review
-    LLMCheck -->|Yes| LLMVerify[LLM verify + find missed PII]
-    LLMVerify --> Verified[Confirmed / disputed / new entities]
-    Verified --> Review[Interactive review — double-click to toggle]
+    LLMCheck -->|Yes| Classify[Classify document type]
+    Classify --> LLMVerify[LLM verify — additive only]
+    LLMVerify --> Review[Interactive review table]
     Review --> Redact[Apply de-identification]
-    Redact --> Output[Redacted PDF + encrypted key file]
+    Redact --> Output[Redacted PDF + audit log + key file]
 ```
 
-## Quick Start
-
-```bash
-# 1. Clone the repo
-git clone <repo-url>
-cd gocalma-redact
-
-# 2. Create and activate a virtual environment (Python 3.9+)
-python -m venv .venv
-source .venv/bin/activate      # macOS / Linux
-# .venv\Scripts\activate       # Windows
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Download the default spaCy English model
-python -m spacy download en_core_web_lg
-
-# 5. Run the app
-streamlit run app.py
-```
-
-The app opens at **http://localhost:8501**.
-
-![GoCalma Redact — upload and side-by-side preview](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.32.png)
-
-> **First run:** The Surya OCR models (~1 GB) download automatically on first use and are cached locally. Subsequent runs are instant. If you enable an LLM backend, model weights (3–15 GB depending on the model) also download on first use.
-
-> **Before redacting:** Always review the detected entities in the interactive table. Verify that all sensitive information has been found — especially on scanned documents — before generating the redacted PDF. Double-click any word directly on the document to add missed items manually.
-
-## Full Installation Guide
-
-### Core (required)
-
-```bash
-pip install -r requirements.txt
-python -m spacy download en_core_web_lg      # English NER (default)
-python -m spacy download en_core_web_sm      # Tokeniser for HuggingFace models
-```
-
-### OCR for scanned PDFs (pick one)
-
-**Option A — Surya (recommended, pure pip, no system binary)**
-```bash
-pip install "surya-ocr<0.5"   # pinned for Python 3.9 compatibility
-```
-Surya auto-detects the document language. No flags needed.
-
-**Option B — Tesseract (fallback)**
-```bash
-# macOS
-brew install tesseract tesseract-lang
-
-# Ubuntu / Debian
-sudo apt-get install tesseract-ocr \
-  tesseract-ocr-deu tesseract-ocr-fra tesseract-ocr-ita
-```
-
-### German / Swiss NER models (recommended for Swiss documents)
-
-```bash
-python -m spacy download de_core_news_lg     # German NER
-python -m spacy download xx_ent_wiki_sm      # Multilingual DE/FR/IT/EN
-```
-
-### LLM verification (optional, improves recall)
-
-**Phi-3.5-mini (~7 GB, fastest local option)**
-```bash
-huggingface-cli download microsoft/Phi-3.5-mini-instruct \
-  --local-dir ~/phi_models/Phi-3.5-mini-instruct
-```
-
-**Phi-4-mini (~8 GB)**
-```bash
-huggingface-cli download microsoft/Phi-4-mini-instruct \
-  --local-dir ~/phi_models/Phi-4-mini-instruct
-```
-
-**Mistral-7B (~15 GB, most accurate)**
-```bash
-huggingface-cli download mistralai/Mistral-7B-Instruct-v0.3 \
-  --local-dir ~/mistral_models/7B-Instruct-v0.3
-```
-
-**Qwen2.5-1.5B (~3 GB, smallest)**
-```bash
-huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct \
-  --local-dir ~/qwen_models/Qwen2.5-1.5B-Instruct
-```
-
-**Ollama (easiest, quantized)**
-```bash
-brew install ollama
-ollama serve
-ollama pull llama3.2     # or phi3:mini, qwen2.5:1.5b
-```
-
-## Supported Entity Types
-
-| Entity | Example | Source |
-|---|---|---|
-| PERSON | Max Mustermann | NER |
-| EMAIL_ADDRESS | info@example.ch | NER |
-| PHONE_NUMBER | 044 123 45 67 | NER + Pattern |
-| LOCATION | Zürich | NER |
-| ADDRESS | Musterstrasse 1 | Custom recognizer |
-| DATE_TIME | 26. März 1975 / 31.01.2024 | NER + German pattern |
-| CH_AHV | 756.1234.5678.90 | Custom recognizer |
-| CH_POSTAL | 8003 (with city) | Custom recognizer |
-| CH_ACCESS_CODE | ABCD-EFgh-IJKL-MNop | Custom recognizer |
-| CH_ID_NUMBER | 12-3456-78 / 100000000000 | Custom recognizer |
-| IBAN_CODE | CH56 0483 5012 3456 7800 9 | NER |
-| CREDIT_CARD | 4111-1111-1111-1111 | NER |
-| IP_ADDRESS | 192.168.1.1 | NER |
-| NRP | Nationalität / citizenship | NER |
-| + all Presidio built-in types | | NER |
-
-Swiss-specific recognizers fire for all supported languages (de / fr / it / en).
-
-![Detected entities table](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.46.png)
-
-## NER Model Backends
-
-| Model | Languages | Speed | Best for |
-|---|---|---|---|
-| `spaCy/en_core_web_lg` | EN | ⚡ Fast | English documents (default) |
-| `spaCy/de_core_news_lg` | DE | ⚡ Fast | German / Swiss-German documents |
-| `spaCy/xx_ent_wiki_sm` | DE FR IT EN | ⚡ Fast | Mixed-language Swiss documents |
-| `HuggingFace/ZurichNLP/swissbert-ner` | DE FR IT RM | 🐢 Medium | Swiss-specific NER, best coverage |
-| `HuggingFace/dslim/bert-base-NER` | EN | 🐢 Medium | General multilingual |
-| `HuggingFace/StanfordAIMI/stanford-deidentifier-base` | EN | 🐢 Medium | Medical de-identification |
-| `HuggingFace/obi/deid_roberta_i2b2` | EN | 🐢 Slow | Medical records |
-| `stanza/en` | EN | 🐢 Slow | High-accuracy English |
-| `flair/ner-english-large` | EN | 🐢 Slow | Flair NER |
-
-Only installed backends appear in the dropdown. Uninstalled models show "(not installed)".
-
-![NER model selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.20.png)
-
-## De-identification Approaches
-
-| Approach | Visual result | Reversible |
-|---|---|---|
-| **redact** | ████████ (black box) | Yes |
-| **replace** | `<PERSON>` | Yes |
-| **mask** | `****` | Yes |
-| **hash** | `[#a3f2c1...]` | Yes |
-| **encrypt** | `[enc:PERSON_a3]` | Yes |
-| **highlight** | Yellow highlight | Yes |
-| **synthesize** | "John Doe", "redacted@example.com" | Yes |
-
-All approaches store the original text in the encrypted key file.
-
-![De-identification approach selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.11.png)
-
-![Reverse redaction and passphrase protection](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.01.png)
-
-## De-redaction (Reverse Redaction)
-
-GoCalma can reverse redactions when the PDF was processed in **reversible mode**. Upload the redacted PDF together with its `.gocalma` key file to restore the original document.
-
-| Mode | What happens |
-|---|---|
-| **Reversible** | Annotations are removed and the original PDF is restored for download |
-| **Permanent** | Original text was destroyed — only the redaction mapping (JSON) is shown for reference |
-
-The mode is auto-detected: if the PDF contains annotation overlays matching the key file labels, it's reversible. If the text layer was flattened/destroyed, it's permanent.
-
-![Reversible de-redaction — original restored](assets/readme-assets/Screenshot%202026-03-18%20at%2006.22.59.png)
-
-![Permanent de-redaction — mapping reference only](assets/readme-assets/Screenshot%202026-03-18%20at%2006.22.08.png)
-
-## OCR Pipeline
+### OCR Pipeline
 
 For image-only or scanned PDFs, GoCalma automatically runs OCR:
 
 ```mermaid
 flowchart LR
-    Page[PDF page - no text layer] --> Render[Render to image]
+    Page[PDF page — no text layer] --> Render[Render to image]
     Render --> SuryaCheck{Surya installed?}
-    SuryaCheck -->|Yes| Surya[Surya OCR - transformer]
+    SuryaCheck -->|Yes| Surya[Surya OCR — transformer]
     SuryaCheck -->|No| TessCheck{Tesseract installed?}
     TessCheck -->|Yes| Tess[Tesseract OCR]
-    TessCheck -->|No| Empty[Empty text - no detection]
+    TessCheck -->|No| Empty[Empty text — no detection]
     Surya --> WordBoxes[Word bounding boxes in PDF coordinates]
     Tess --> WordBoxes
-    WordBoxes --> NER[NER detection with char offsets]
+    WordBoxes --> NER2[NER detection with char offsets]
     WordBoxes --> Viewer[Interactive viewer with clickable words]
-    NER --> Redact[Redaction boxes drawn at OCR coordinates]
+    NER2 --> RedactBoxes[Redaction boxes drawn at OCR coordinates]
 ```
 
 Word bounding boxes from OCR are stored with exact character offsets, ensuring redaction rectangles land precisely on the right words even for photographed documents.
 
-## LLM Verification Pipeline
-
-When enabled, the LLM runs **after** NER as a second pass:
+### LLM Verification Pipeline
 
 ```mermaid
 sequenceDiagram
-    participant NER as Presidio NER
-    participant LLM as Local LLM
+    participant Regex as Regex + NER
+    participant LLM as Local LLM (Ollama)
     participant User as Review Table
 
-    NER->>User: Entity list (instant)
-    User->>LLM: Verify these + find missed PII
-    LLM->>User: Verdicts + new entities (Zugangscode, AHV, names...)
-    Note over User: Disputed entities default to unchecked
+    Regex->>User: Entity list with confidence scores
+    User->>LLM: Verify non-protected entities + find missed PII
+    LLM->>User: Verdicts + new entities
+    Note over User: Protected types (PERSON, AHV, IBAN...) never sent to LLM
+    Note over User: LLM disputes without reason → overridden to CONFIRMED
     Note over User: New LLM entities tagged with LLM badge
 ```
 
-The LLM prompt is tuned for Swiss documents: it explicitly lists AHV numbers, Zugangscodes, PIDs, and Swiss reference formats, and defaults to `confirmed` when uncertain to minimize missed PII.
-
-![LLM detector selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.28.png)
+---
 
 ## Security Model
 
@@ -276,80 +304,139 @@ flowchart TD
     EncryptMap --> V1File
 ```
 
-**Security features:**
+**Security details:**
+- Encryption: Fernet (AES-128-CBC + HMAC-SHA256) via Python `cryptography` library
+- Key derivation: PBKDF2-HMAC-SHA256 with random 16-byte salt, 480,000 iterations
+- File format: `.gocalma` v1 (no password) or v2 (password-protected)
 - Upload size capped at 50 MB
-- Key file passphrase: PBKDF2-HMAC-SHA256, 480,000 iterations (OWASP recommendation)
-- Thread-safe NLP engine cache with LRU eviction (max 2 models in memory)
-- LLM prompt-injection guard: document content wrapped in `<document_content>` delimiters
+- LLM prompt-injection guard: `<document_content>` delimiters
 - LLM hallucination filter: entities whose text doesn't appear in the source are discarded
-- Graceful LLM failure: inference errors return original NER entities unchanged
-- All file handles use `try/finally` for guaranteed cleanup
+- Graceful LLM failure: inference errors return NER entities unchanged
+- Source code: [`crypto.py`](gocalma/crypto.py)
+
+---
+
+## Quick Start
+
+### Option A — Local (Python 3.9+)
+
+```bash
+git clone https://github.com/alallaqi/go-calma-redact
+cd go-calma-redact
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+# → http://localhost:8501
+```
+
+> **First run:** The multilingual BERT NER model (~700 MB) and Flan-T5 summariser (~77 MB) download automatically on first use and are cached locally. Subsequent runs are instant.
+
+### Option B — With LLM verification
+
+```bash
+# Install Ollama
+brew install ollama    # macOS
+# or: curl -fsSL https://ollama.ai/install.sh | sh  # Linux
+
+# Start Ollama and pull a model
+ollama serve
+ollama pull qwen2.5:0.5b    # 400 MB, fastest
+# or: ollama pull qwen2.5:1.5b   # 1.5 GB, more accurate
+
+# Run the app — it auto-detects Ollama
+streamlit run app.py
+```
+
+### OCR for scanned PDFs (pick one)
+
+**Option A — Surya (recommended, pure pip)**
+```bash
+pip install "surya-ocr<0.5"
+```
+
+**Option B — Tesseract (fallback)**
+```bash
+# macOS
+brew install tesseract tesseract-lang
+
+# Ubuntu / Debian
+sudo apt-get install tesseract-ocr tesseract-ocr-deu tesseract-ocr-fra tesseract-ocr-ita
+```
+
+---
+
+## Advanced Model Selection
+
+The Advanced panel in the sidebar exposes both NER and LLM model selectors.
+
+### NER Models
+
+| Model | Languages | Best for |
+|-------|-----------|----------|
+| `Davlan/bert-base-multilingual-cased-ner-hrl` | EN DE FR IT ES PT NL | All-round (default) |
+| `dslim/bert-base-NER` | EN | English-only documents, faster |
+| `Davlan/xlm-roberta-large-ner-hrl` | EN DE FR IT ES PT NL | Maximum accuracy, slower |
+
+Only installed models appear without a warning badge. The pipeline lazily reloads when you switch.
+
+![NER model selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.20.png)
+
+### LLM Models
+
+The LLM dropdown shows every model you have pulled in Ollama. Any Ollama-compatible model works — the verification prompt is model-agnostic.
+
+![LLM detector selector](assets/readme-assets/Screenshot%202026-03-15%20at%2008.09.28.png)
+
+---
 
 ## Project Structure
 
 ```
 gocalma-redact/
-├── app.py                          # Streamlit UI entry point
+├── app.py                          Streamlit UI — upload, review, redact, de-redact
 ├── requirements.txt
-├── README.md
-├── .gitignore
+├── IMPROVEMENTS.md
 ├── assets/
 │   ├── logo.png
-│   └── favicon.png
+│   └── readme-assets/              Screenshots for this README
 ├── benchmarks/
-│   └── run_benchmark.py            # Standalone NER model benchmarking tool
+│   └── run_benchmark.py            Standalone NER model benchmarking tool
 ├── tests/
+│   ├── test_recognizers.py         Regex, merge, confidence, LLM protection, false positives
+│   ├── test_llm_detect.py          LLM prompt parsing, doc classification, entity protection
+│   ├── test_pii_detect.py          NER pipeline, deduplication, language detection
+│   ├── test_pdf_extract.py         PDF extraction, OCR, page limits
+│   ├── test_redactor.py            All 7 de-id modes, reversibility, HMAC hash
+│   └── test_crypto.py              Fernet encryption, PBKDF2, key file formats
 └── gocalma/
-    ├── __init__.py
-    ├── pdf_extract.py              # PDF text extraction + Surya/Tesseract OCR
-    ├── pii_detect.py               # Presidio NER (9 backends, Swiss recognizers, lang detection)
-    ├── llm_detect.py               # LLM verification pipeline (Phi/Mistral/Qwen/Ollama)
-    ├── redactor.py                 # PDF redaction engine (7 approaches, OCR-aware)
-    ├── crypto.py                   # Encrypted key file (Fernet + PBKDF2)
+    ├── pii_detect.py               Multilingual BERT NER + confidence scoring
+    ├── regex_patterns.py           24 compiled patterns + priority merge + filters
+    ├── llm_detect.py               Ollama LLM verification — additive only, entity protection
+    ├── summariser.py               Flan-T5 risk summary (critical / moderate / low)
+    ├── audit.py                    GDPR audit trail — metadata only, no document content
+    ├── redactor.py                 7 de-id modes, OCR-aware, reversible annotations
+    ├── crypto.py                   Fernet + PBKDF2-480k, .gocalma key file format
+    ├── pdf_extract.py              PyMuPDF text extraction + Surya/Tesseract OCR
     └── components/
-        ├── pdf_viewer.py           # Streamlit component wrapper
+        ├── pdf_viewer.py           Streamlit component wrapper
         └── frontend/
-            └── index.html          # Interactive PDF viewer (hover + double-click)
+            └── index.html          Interactive PDF viewer (hover + double-click)
 ```
 
-## NER Benchmark
+**Test suite:** 179 tests across 6 test files. Run with `python -m pytest tests/ -v`.
 
-A standalone benchmarking script is included at `benchmarks/run_benchmark.py`. It iterates all available NER models across a folder of PDFs and outputs timing and entity detection statistics.
-
-```bash
-# Run against a folder of PDFs
-python benchmarks/run_benchmark.py /path/to/pdfs
-
-# Run specific models only
-python benchmarks/run_benchmark.py /path/to/pdfs \
-  --models "spaCy/en_core_web_lg" "spaCy/de_core_news_lg"
-
-# Output goes to benchmarks/results.json + benchmarks/results.xlsx
-```
-
-### Benchmark Results — 14 English/Mixed PDFs (insurance, invoices)
-
-| Model | Avg/Doc | Cold Start | Total Entities | Unique Types | Notes |
-|---|---|---|---|---|---|
-| **spaCy/en_core_web_lg** | **0.10s** | 1.4s | **1,211** | 14 | Best speed + coverage |
-| HuggingFace/dslim/bert-base-NER | 0.28s | 2.9s | 1,005 | 13 | Over-classifies ORGANIZATION |
-| HuggingFace/StanfordAIMI/stanford-deidentifier-base | 0.25s | 3.4s | 914 | 10 | Adds `ID` entity type |
-| HuggingFace/obi/deid_roberta_i2b2 | 0.78s | **169s** | 690 | 15 | Medical focus, slow cold start |
-| stanza/en | 1.04s | 50s | 669 | 14 | Accurate but slow |
-| HuggingFace/ZurichNLP/swissbert-ner | 0.05s* | 8.6s | 470* | 7* | *Needs German docs; PERSON/LOC fixed |
-| flair/ner-english-large | — | — | — | — | Not compatible with current Presidio |
-
-**Key findings:**
-- spaCy is the fastest and catches the most entities on English documents
-- SwissBERT is the right choice for German/Swiss documents after the XMod `set_default_language` fix
-- obi/deid_roberta_i2b2 has a 169s cold start — unusable in interactive contexts
-- For Swiss tax forms and government letters, `de_core_news_lg` + SwissBERT + Swiss pattern recognizers gives the best combined coverage
+---
 
 ## Roadmap
 
-- **Faster LLM verification** — evaluate smaller/quantized models (Qwen2.5-0.5B, SmolLM2) to reduce per-page verification time below 3s while maintaining Swiss PII recall
-- **ML-based entity ranking** — train a lightweight classifier on Swiss document patterns to score and prioritise detected entities, reducing false positives without an LLM
-- **Batch processing** — redact multiple PDFs in one run with a shared output folder
+- [ ] React / Vanilla JS frontend (in progress)
+- [ ] Vercel frontend deployment
+- [ ] Batch processing (multiple PDFs, ZIP output)
+- [ ] SwissBERT option in Advanced mode for maximum Swiss German accuracy
+- [ ] Smaller quantised LLM (Qwen2.5-0.5B) for sub-3s verification
+
+---
 
 ## License
 
