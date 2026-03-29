@@ -257,10 +257,134 @@ def compute_confidence(entity: dict, full_text: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Core detection
+# Chunked NER inference — handles documents of any length
 # ---------------------------------------------------------------------------
 
-_MAX_NER_CHARS = 4500  # BERT models cap at 512 tokens
+_MAX_TOKENS = 460       # leave room for [CLS]/[SEP] special tokens
+_OVERLAP_TOKENS = 50    # overlap between consecutive chunks
+
+
+def _chunk_text(text: str, tokenizer, max_tokens: int = _MAX_TOKENS,
+                overlap_tokens: int = _OVERLAP_TOKENS) -> list[dict]:
+    """Split *text* into overlapping chunks that fit within BERT's token limit.
+
+    Returns a list of dicts with keys:
+        text, char_start, char_end, token_start
+    where char_start/char_end are absolute offsets in the original *text*.
+    """
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    token_ids = encoding["input_ids"]
+    offsets = encoding["offset_mapping"]  # list of (char_start, char_end) per token
+
+    if not token_ids:
+        return []
+
+    chunks: list[dict] = []
+    step = max(1, max_tokens - overlap_tokens)
+
+    for start_tok in range(0, len(token_ids), step):
+        end_tok = min(start_tok + max_tokens, len(token_ids))
+
+        # Absolute char boundaries from the offset mapping
+        char_start = offsets[start_tok][0]
+        char_end = offsets[end_tok - 1][1]
+
+        chunks.append({
+            "text": text[char_start:char_end],
+            "char_start": char_start,
+            "char_end": char_end,
+            "token_start": start_tok,
+        })
+
+        if end_tok >= len(token_ids):
+            break
+
+    return chunks
+
+
+def _deduplicate_across_chunks(entities: list[dict]) -> list[dict]:
+    """Remove duplicate detections caused by the overlap zone.
+
+    An entity is a duplicate if it overlaps in span with an already-accepted
+    entity of the same type, or has identical text (case-insensitive).
+    When duplicates are found, the one with the higher score is kept.
+    """
+    sorted_ents = sorted(entities, key=lambda e: -e.get("score", 0))
+    accepted: list[dict] = []
+
+    for candidate in sorted_ents:
+        is_dup = False
+        for kept in accepted:
+            spans_overlap = (
+                candidate["start"] < kept["end"] and kept["start"] < candidate["end"]
+            )
+            text_match = (
+                candidate["text"].strip().lower() == kept["text"].strip().lower()
+            )
+            if spans_overlap or text_match:
+                is_dup = True
+                break
+        if not is_dup:
+            accepted.append(candidate)
+
+    accepted.sort(key=lambda e: e["start"])
+    return accepted
+
+
+def run_ner_on_full_text(
+    text: str,
+    score_threshold: float = 0.35,
+) -> list[dict]:
+    """Run NER across the full document text using chunked inference.
+
+    Handles documents of any length by splitting into overlapping chunks,
+    running the BERT model on each chunk, and deduplicating entities from
+    the overlap zones.  Returns entities with absolute character offsets.
+    """
+    pipe = _get_ner_pipe()
+    tokenizer = pipe.tokenizer
+
+    chunks = _chunk_text(text, tokenizer)
+    if not chunks:
+        return []
+
+    all_entities: list[dict] = []
+
+    for chunk in chunks:
+        try:
+            items = pipe(chunk["text"])
+        except Exception as exc:
+            _log.warning("NER chunk failed (char %d–%d): %s",
+                         chunk["char_start"], chunk["char_end"], exc)
+            continue
+
+        for item in items:
+            entity_group = item.get("entity_group", item.get("entity", ""))
+            if entity_group.startswith(("B-", "I-")):
+                entity_group = entity_group[2:]
+            entity_type = _NER_LABEL_MAP.get(entity_group, entity_group)
+            raw_score = float(item["score"])
+            if raw_score < score_threshold:
+                continue
+
+            abs_start = chunk["char_start"] + item["start"]
+            abs_end = chunk["char_start"] + item["end"]
+
+            all_entities.append({
+                "text": text[abs_start:abs_end],
+                "start": abs_start,
+                "end": abs_end,
+                "type": entity_type,
+                "score": raw_score,
+                "source": "ner",
+            })
+
+    return _deduplicate_across_chunks(all_entities)
+
+
+# ---------------------------------------------------------------------------
+# Core detection
+# ---------------------------------------------------------------------------
 
 
 def detect_pii(
@@ -273,7 +397,7 @@ def detect_pii(
     """Detect PII in *text* using regex patterns + multilingual BERT NER.
 
     1. Run regex_patterns.run_regex(text)
-    2. Run multilingual BERT NER
+    2. Run multilingual BERT NER (chunked for long text)
     3. Merge with priority (regex wins ties)
     4. Return deduplicated entity list
 
@@ -287,26 +411,10 @@ def detect_pii(
     # Step 1: regex patterns
     regex_hits = run_regex(text)
 
-    # Step 2: multilingual BERT NER
+    # Step 2: multilingual BERT NER (chunked inference, handles any length)
     ner_hits: list[dict] = []
     try:
-        pipe = _get_ner_pipe()
-        items = pipe(text[:_MAX_NER_CHARS])
-        for item in items:
-            entity_group = item.get("entity_group", item.get("entity", ""))
-            if entity_group.startswith(("B-", "I-")):
-                entity_group = entity_group[2:]
-            entity_type = _NER_LABEL_MAP.get(entity_group, entity_group)
-            score = float(item["score"])
-            if score < score_threshold:
-                continue
-            ner_hits.append({
-                "text": text[item["start"]:item["end"]],
-                "start": item["start"],
-                "end": item["end"],
-                "type": entity_type,
-                "source": "ner",
-            })
+        ner_hits = run_ner_on_full_text(text, score_threshold=score_threshold)
     except Exception as exc:
         _log.warning("NER pipeline failed: %s", exc)
 
@@ -347,7 +455,7 @@ def detect_pii_all_pages(pages: list, **kwargs) -> list[PIIEntity]:
     """Run detection across multiple PageText objects in parallel."""
     all_entities: list[PIIEntity] = []
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(detect_pii, page.text, page.page_num, **kwargs): page.page_num
             for page in pages

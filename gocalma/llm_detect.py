@@ -726,3 +726,95 @@ def verify_entities(
             output.append(ent)
 
     return (other_ents + output, True)
+
+
+def verify_entities_batch(
+    entities: list[PIIEntity],
+    pages: list,
+    doc_type: str = "general",
+) -> tuple[list[PIIEntity], bool]:
+    """Verify entities across ALL pages in a single LLM call.
+
+    Instead of calling the LLM once per page, this collects all non-protected
+    entities and sends them in one request with a combined text excerpt.
+
+    Returns:
+        (entities, llm_ran) — if LLM is unavailable, returns originals unchanged.
+    """
+    if not LLM_AVAILABLE:
+        return (entities, False)
+
+    if not entities or not pages:
+        return (entities, True)
+
+    # Split into protected (bypass LLM) and to-verify
+    protected: list[PIIEntity] = []
+    to_verify: list[PIIEntity] = []
+    for ent in entities:
+        if _is_protected(ent):
+            protected.append(ent)
+        else:
+            to_verify.append(ent)
+
+    if not to_verify:
+        return (protected, True)
+
+    # Build combined text excerpt from all pages (cap at ~8000 chars total)
+    page_map: dict[int, str] = {p.page_num: (p.text or "") for p in pages}
+    combined_text_parts: list[str] = []
+    total_chars = 0
+    for pnum in sorted(page_map):
+        remaining = 8000 - total_chars
+        if remaining <= 0:
+            break
+        excerpt = page_map[pnum][:remaining]
+        combined_text_parts.append(f"--- Page {pnum + 1} ---\n{excerpt}")
+        total_chars += len(excerpt)
+    combined_text = "\n\n".join(combined_text_parts)
+    combined_text = combined_text.replace(_CONTENT_START, "").replace(_CONTENT_END, "")
+
+    # Build entity list for the prompt
+    entity_lines = []
+    for ent in to_verify:
+        entity_lines.append(f"- [p{ent.page_num + 1}] [{ent.entity_type}] \"{ent.text}\"")
+    entity_list_str = "\n".join(entity_lines)
+
+    prompt = _VERIFY_PROMPT_SIMPLE.format(
+        entity_list=entity_list_str,
+        context_window=combined_text,
+    )
+
+    messages = [
+        {"role": "system", "content": "You are a privacy compliance assistant."},
+        {"role": "user",   "content": prompt},
+    ]
+
+    try:
+        assistant_text = _call_ollama(messages)
+    except Exception as exc:
+        _log.warning("Batch LLM verification failed: %s", exc)
+        return (entities, False)
+
+    verdicts = _parse_simple_verdicts(assistant_text)
+
+    # Apply verdicts
+    output: list[PIIEntity] = list(protected)
+    for ent in to_verify:
+        ent_key = ent.text.strip().lower()
+        verdict_tuple = verdicts.get(ent_key, ("confirmed", None))
+        verdict, reason = verdict_tuple
+
+        ent_dict = {
+            "text": ent.text, "type": ent.entity_type,
+            "source": ent.source, "confidence": ent.score,
+        }
+        result = apply_llm_verdict(ent_dict, verdict.upper(), reason)
+
+        if result["llm_status"] == "false_positive":
+            ent.analysis = f"review: {result['llm_note']}" if result["llm_note"] else "review"
+        else:
+            ent.analysis = "LLM verified"
+        output.append(ent)
+
+    output.sort(key=lambda e: (e.page_num, e.start))
+    return (output, True)

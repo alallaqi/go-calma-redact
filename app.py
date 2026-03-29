@@ -41,6 +41,7 @@ from gocalma.pii_detect import detect_pii_all_pages, PIIEntity
 from gocalma.llm_detect import (
     is_available as is_llm_available,
     verify_entities as llm_verify_entities,
+    verify_entities_batch as llm_verify_entities_batch,
     classify_document,
     list_ollama_models, get_llm_model, set_llm_model,
 )
@@ -662,15 +663,9 @@ else:
                 st.session_state.doc_type = doc_type
 
                 with st.spinner(f"LLM verifying entities with {get_llm_model()}..."):
-                    for page in pages:
-                        page_ents = [e for e in entities if e.page_num == page.page_num]
-                        verified, ran = llm_verify_entities(
-                            page_ents, page.text, page_num=page.page_num, doc_type=doc_type,
-                        )
-                        if ran:
-                            # Replace page entities with verified versions
-                            entities = [e for e in entities if e.page_num != page.page_num] + verified
-                    entities.sort(key=lambda e: (e.page_num, e.start))
+                    entities, _ = llm_verify_entities_batch(
+                        entities, pages, doc_type=doc_type,
+                    )
 
             disputed = [e for e in entities if "review" in e.analysis.lower()]
             llm_new = [e for e in entities if e.source == "LLM"]

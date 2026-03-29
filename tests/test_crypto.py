@@ -1,9 +1,8 @@
-"""Tests for gocalma.crypto — key generation, encryption, and key-file formats."""
+"""Tests for gocalma.crypto — AES-256-GCM key generation, encryption, and key-file formats."""
 
 from __future__ import annotations
 
 import pytest
-from cryptography.fernet import InvalidToken
 
 from gocalma.crypto import (
     generate_key,
@@ -13,6 +12,9 @@ from gocalma.crypto import (
     load_key_file,
     _SENTINEL_V1,
     _SENTINEL_V2,
+    _SENTINEL_V3,
+    _KEY_SIZE,
+    _NONCE_SIZE,
 )
 
 SAMPLE_MAPPING = {
@@ -23,7 +25,7 @@ SAMPLE_MAPPING = {
 
 
 # ---------------------------------------------------------------------------
-# Basic encrypt / decrypt round-trip
+# Basic encrypt / decrypt round-trip (AES-256-GCM)
 # ---------------------------------------------------------------------------
 
 class TestEncryptDecrypt:
@@ -37,7 +39,7 @@ class TestEncryptDecrypt:
         key1 = generate_key()
         key2 = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key1)
-        with pytest.raises(Exception):  # InvalidToken or similar
+        with pytest.raises(ValueError):
             decrypt_mapping(ct, key2)
 
     def test_empty_mapping(self):
@@ -48,11 +50,28 @@ class TestEncryptDecrypt:
     def test_generate_key_returns_bytes(self):
         key = generate_key()
         assert isinstance(key, bytes)
-        assert len(key) == 44  # Fernet key is URL-safe base64, always 44 chars
+        assert len(key) == _KEY_SIZE  # 32 bytes = 256 bits
+
+    def test_ciphertext_starts_with_nonce(self):
+        key = generate_key()
+        ct = encrypt_mapping(SAMPLE_MAPPING, key)
+        assert len(ct) > _NONCE_SIZE
+
+    def test_different_encryptions_differ(self):
+        """Each encryption uses a fresh random nonce."""
+        key = generate_key()
+        ct1 = encrypt_mapping(SAMPLE_MAPPING, key)
+        ct2 = encrypt_mapping(SAMPLE_MAPPING, key)
+        assert ct1 != ct2  # different nonces
+
+    def test_plaintext_not_in_ciphertext(self):
+        key = generate_key()
+        ct = encrypt_mapping(SAMPLE_MAPPING, key)
+        assert b"John Smith" not in ct
 
 
 # ---------------------------------------------------------------------------
-# Key file — no password (legacy format)
+# Key file — no password (v3 format)
 # ---------------------------------------------------------------------------
 
 class TestKeyFileNoPassword:
@@ -64,12 +83,11 @@ class TestKeyFileNoPassword:
         assert k2 == key
         assert decrypt_mapping(ct2, k2) == SAMPLE_MAPPING
 
-    def test_uses_v1_sentinel(self):
+    def test_uses_v3_sentinel(self):
         key = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
         blob = save_key_file(key, ct)
-        assert _SENTINEL_V1 in blob
-        assert not blob.startswith(_SENTINEL_V2)
+        assert blob.startswith(_SENTINEL_V3)
 
     def test_load_without_password_succeeds(self):
         key = generate_key()
@@ -80,7 +98,7 @@ class TestKeyFileNoPassword:
 
 
 # ---------------------------------------------------------------------------
-# Key file — with password (v2 format)
+# Key file — with password (v3 format, AES-256-GCM key wrapping)
 # ---------------------------------------------------------------------------
 
 class TestKeyFileWithPassword:
@@ -92,11 +110,11 @@ class TestKeyFileWithPassword:
         assert k2 == key
         assert decrypt_mapping(ct2, k2) == SAMPLE_MAPPING
 
-    def test_uses_v2_sentinel(self):
+    def test_uses_v3_sentinel(self):
         key = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
         blob = save_key_file(key, ct, password="secret")
-        assert blob.startswith(_SENTINEL_V2)
+        assert blob.startswith(_SENTINEL_V3)
 
     def test_wrong_password_raises_value_error(self):
         key = generate_key()
@@ -105,15 +123,16 @@ class TestKeyFileWithPassword:
         with pytest.raises(ValueError, match="Incorrect passphrase"):
             load_key_file(blob, password="wrong")
 
-    def test_missing_password_raises_value_error(self):
+    def test_missing_password_loads_as_no_password(self):
+        """v3 without password flag — key is embedded in cleartext."""
         key = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
-        blob = save_key_file(key, ct, password="secret")
-        with pytest.raises(ValueError, match="password-protected"):
-            load_key_file(blob, password=None)
+        blob = save_key_file(key, ct)  # no password
+        k, c = load_key_file(blob, password=None)
+        assert decrypt_mapping(c, k) == SAMPLE_MAPPING
 
     def test_data_key_not_in_blob(self):
-        """The raw Fernet data key must not appear in the password-protected blob."""
+        """The raw data key must not appear in the password-protected blob."""
         key = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
         blob = save_key_file(key, ct, password="mypassword")
@@ -124,17 +143,53 @@ class TestKeyFileWithPassword:
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
         blob1 = save_key_file(key, ct, password="alpha")
         blob2 = save_key_file(key, ct, password="alpha")
-        # Different random salts → different blobs even for same password
+        # Different random salts/nonces → different blobs even for same password
         assert blob1 != blob2
 
     def test_empty_password_string_treated_as_no_password(self):
-        """Passing an empty string (from the UI) should be treated as no password."""
-        # The app does: password=st.session_state.get("key_password") or None
-        # so empty string becomes None before reaching save_key_file.
         key = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
         blob = save_key_file(key, ct, password=None)
-        assert not blob.startswith(_SENTINEL_V2)
+        assert blob.startswith(_SENTINEL_V3)
+
+
+# ---------------------------------------------------------------------------
+# Legacy format backward compatibility
+# ---------------------------------------------------------------------------
+
+class TestLegacyFormats:
+    def test_v1_blob_can_be_loaded(self):
+        """v1 (Fernet, no password) blobs must still be readable."""
+        from cryptography.fernet import Fernet
+        fernet_key = Fernet.generate_key()
+        plaintext = b'{"[PERSON]": "Alice"}'
+        ct = Fernet(fernet_key).encrypt(plaintext)
+        blob = fernet_key + _SENTINEL_V1 + ct
+        key, ciphertext = load_key_file(blob)
+        assert key == fernet_key
+        # Decrypting with a Fernet key (44 bytes) falls through to legacy path
+        recovered = decrypt_mapping(ciphertext, key)
+        assert recovered == {"[PERSON]": "Alice"}
+
+    def test_v2_blob_can_be_loaded(self):
+        """v2 (Fernet, password-protected) blobs must still be readable."""
+        import base64
+        import hashlib
+        from cryptography.fernet import Fernet
+        fernet_key = Fernet.generate_key()
+        plaintext = b'{"[EMAIL]": "a@b.com"}'
+        ct = Fernet(fernet_key).encrypt(plaintext)
+        # Build a v2 blob manually
+        salt = b"\x00" * 16
+        raw = hashlib.pbkdf2_hmac("sha256", b"pw", salt, 480_000)
+        pw_key = base64.urlsafe_b64encode(raw[:32])
+        enc_key = Fernet(pw_key).encrypt(fernet_key)
+        enc_key_len = len(enc_key).to_bytes(4, "big")
+        blob = _SENTINEL_V2 + salt + enc_key_len + enc_key + ct
+        key, ciphertext = load_key_file(blob, password="pw")
+        assert key == fernet_key
+        recovered = decrypt_mapping(ciphertext, key)
+        assert recovered == {"[EMAIL]": "a@b.com"}
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +201,16 @@ class TestCorruptBlobs:
         with pytest.raises(ValueError, match="Unrecognised"):
             load_key_file(b"this is not a valid key file at all")
 
-    def test_truncated_v2_raises(self):
+    def test_truncated_v3_raises(self):
         key = generate_key()
         ct = encrypt_mapping(SAMPLE_MAPPING, key)
         blob = save_key_file(key, ct, password="pw")
         with pytest.raises(ValueError):
             load_key_file(blob[:20], password="pw")
+
+    def test_truncated_v3_no_password_raises(self):
+        key = generate_key()
+        ct = encrypt_mapping(SAMPLE_MAPPING, key)
+        blob = save_key_file(key, ct)
+        with pytest.raises(ValueError):
+            load_key_file(blob[:15])  # too short for sentinel + key

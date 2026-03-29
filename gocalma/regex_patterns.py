@@ -5,10 +5,12 @@ Priority scale:
     10 = highly specific identifiers (AHV, IBAN, SSN, credit card)
      9 = email, passport, insurance, Zugangscode
      8 = phone numbers
+     7 = label-context (keyword + value pairs)
      6 = NER person name (used later for merge)
      5 = NER location / address
      4 = NER organisation
      3 = date of birth
+     2 = health data (ICD codes, diagnoses)
 """
 
 from __future__ import annotations
@@ -26,6 +28,24 @@ CRITICAL_TYPES: set[str] = {
     "IBAN_INTL",
     "CREDIT_CARD",
 }
+
+# ---------------------------------------------------------------------------
+# Luhn checksum for credit card validation
+# ---------------------------------------------------------------------------
+def _luhn_check(digits: str) -> bool:
+    """Return True if *digits* passes the Luhn checksum (credit card validation)."""
+    nums = [int(d) for d in digits if d.isdigit()]
+    if len(nums) < 13:
+        return False
+    total = 0
+    for i, n in enumerate(reversed(nums)):
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
 
 # ---------------------------------------------------------------------------
 # Pattern registry: (compiled_regex, entity_type, priority)
@@ -99,7 +119,7 @@ PATTERNS: list[tuple[re.Pattern[str], str, int]] = [
     # International IBAN  2-letter country + 2 check digits + up to 30 alphanumeric
     (re.compile(r"\b[A-Z]{2}\d{2}\s?[\dA-Z]{4}(?:\s?[\dA-Z]{4}){2,7}(?:\s?[\dA-Z]{1,4})?\b"), "IBAN_INTL", 10),
 
-    # Credit card  13-19 digits optionally separated by spaces/dashes (Luhn validation recommended)
+    # Credit card  13-19 digits optionally separated by spaces/dashes (Luhn-validated)
     (re.compile(r"\b(?:\d[\s\-]?){13,19}\b"), "CREDIT_CARD", 10),
 
     # IP address  IPv4
@@ -115,6 +135,105 @@ PATTERNS: list[tuple[re.Pattern[str], str, int]] = [
     (re.compile(r"\b\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b"), "DATE_OF_BIRTH", 3),
 ]
 
+# ---------------------------------------------------------------------------
+# Label-context patterns — keyword + value pairs (priority 7)
+# These detect PII via surrounding labels like "Name:", "Patient:", etc.
+# ---------------------------------------------------------------------------
+LABEL_CONTEXT_PATTERNS: list[tuple[re.Pattern[str], str, int]] = [
+    # Person name after label keywords (multilingual)
+    (re.compile(
+        r"(?:(?:name|patient|holder|insured|versicherte[rn]?|assur[eé]e?"
+        r"|empfänger|inhaber|beneficiary|claimant)"
+        r"\s*[:=\-]\s*)"
+        r"([A-ZÄÖÜ][a-zäöüß]{2,25}(?:\s+[A-ZÄÖÜ][a-zäöüß]{2,25}){0,2})",
+        re.IGNORECASE,
+    ), "PERSON", 7),
+
+    # Doctor / physician name after label
+    (re.compile(
+        r"(?:(?:physician|doctor|arzt|ärztin|médecin|dottore)"
+        r"\s*[:=\-]\s*)"
+        r"([A-ZÄÖÜ][a-zäöüß]{2,25}(?:\s+[A-ZÄÖÜ][a-zäöüß]{2,25}){0,2})",
+        re.IGNORECASE,
+    ), "PERSON", 7),
+
+    # Insurance / policy number after label
+    (re.compile(
+        r"(?:(?:insurance|versicherungs?|police|policy|assurance)"
+        r"[\s\-]*(?:no\.?|nr\.?|number|nummer)?"
+        r"\s*[:=\-]\s*)"
+        r"([A-Z0-9][\w.\-\s]{2,20})",
+        re.IGNORECASE,
+    ), "INSURANCE_NUMBER", 7),
+
+    # Date of birth after label
+    (re.compile(
+        r"(?:(?:date\s+of\s+birth|d\.?\s*o\.?\s*b\.?|geburtsdatum"
+        r"|date\s+de\s+naissance|data\s+di\s+nascita|geboren)"
+        r"\s*[:=\-]\s*)"
+        r"(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})",
+        re.IGNORECASE,
+    ), "DATE_OF_BIRTH", 7),
+
+    # ID / passport number after label
+    (re.compile(
+        r"(?:(?:passport|ausweis|reisepass|carta\s+d'identit[àa]"
+        r"|identity\s+card|personalausweis)"
+        r"[\s\-]*(?:no\.?|nr\.?|number|nummer)?"
+        r"\s*[:=\-]\s*)"
+        r"([A-Z0-9][\w\-]{4,15})",
+        re.IGNORECASE,
+    ), "ID_NUMBER", 7),
+
+    # Address after label
+    (re.compile(
+        r"(?:(?:address|adresse|anschrift|wohnort|domicile|indirizzo)"
+        r"\s*[:=\-]\s*)"
+        r"(.{5,80}?)(?=\n|\r|$)",
+        re.IGNORECASE,
+    ), "ADDRESS", 7),
+]
+
+# ---------------------------------------------------------------------------
+# Health / medical patterns (priority 2–7)
+# ---------------------------------------------------------------------------
+HEALTH_PATTERNS: list[tuple[re.Pattern[str], str, int]] = [
+    # ICD-10 codes  A00-T98, V-Z codes
+    (re.compile(r"\b[A-TV-Z]\d{2}(?:\.\d{1,2})?\b"), "ICD_CODE", 2),
+
+    # Diagnosis after label
+    (re.compile(
+        r"(?:(?:diagnosis|diagnose|diagnostic)"
+        r"\s*[:=\-]\s*)"
+        r"(.{3,60}?)(?=\n|\r|$)",
+        re.IGNORECASE,
+    ), "HEALTH_DATA", 7),
+
+    # Medication after label
+    (re.compile(
+        r"(?:(?:medications?|medikamente?|médicaments?|current\s+treatment)"
+        r"\s*[:=\-]\s*)"
+        r"(.{3,80}?)(?=\n|\r|$)",
+        re.IGNORECASE,
+    ), "HEALTH_DATA", 7),
+
+    # Allergy after label
+    (re.compile(
+        r"(?:(?:allergies?|allergi(?:en|es?))"
+        r"\s*[:=\-]\s*)"
+        r"(.{3,60}?)(?=\n|\r|$)",
+        re.IGNORECASE,
+    ), "HEALTH_DATA", 7),
+
+    # Blood type
+    (re.compile(
+        r"(?:(?:blood\s+(?:type|group)|blutgruppe|groupe\s+sanguin)"
+        r"\s*[:=\-]?\s*)"
+        r"([ABO]{1,2}[+\-])",
+        re.IGNORECASE,
+    ), "HEALTH_DATA", 7),
+]
+
 
 # ---------------------------------------------------------------------------
 # run_regex — scan text with all patterns
@@ -126,16 +245,62 @@ def run_regex(text: str) -> list[dict[str, Any]]:
         text, start, end, type, priority, source
     """
     results: list[dict[str, Any]] = []
+
+    # Standard patterns (full match)
     for regex, entity_type, priority in PATTERNS:
         for m in regex.finditer(text):
+            matched_text = m.group()
+            # Luhn validation for credit card matches
+            if entity_type == "CREDIT_CARD":
+                digits = "".join(c for c in matched_text if c.isdigit())
+                if not _luhn_check(digits):
+                    continue
             results.append({
-                "text": m.group(),
+                "text": matched_text,
                 "start": m.start(),
                 "end": m.end(),
                 "type": entity_type,
                 "priority": priority,
                 "source": "regex",
             })
+
+    # Label-context patterns (capture group 1)
+    for regex, entity_type, priority in LABEL_CONTEXT_PATTERNS:
+        for m in regex.finditer(text):
+            captured = m.group(1).strip() if m.lastindex and m.lastindex >= 1 else m.group().strip()
+            if len(captured) < 3:
+                continue
+            results.append({
+                "text": captured,
+                "start": m.start(1) if m.lastindex and m.lastindex >= 1 else m.start(),
+                "end": m.end(1) if m.lastindex and m.lastindex >= 1 else m.end(),
+                "type": entity_type,
+                "priority": priority,
+                "source": "regex",
+            })
+
+    # Health patterns (capture group 1 where applicable)
+    for regex, entity_type, priority in HEALTH_PATTERNS:
+        for m in regex.finditer(text):
+            if m.lastindex and m.lastindex >= 1:
+                captured = m.group(1).strip()
+                start = m.start(1)
+                end = m.end(1)
+            else:
+                captured = m.group().strip()
+                start = m.start()
+                end = m.end()
+            if len(captured) < 2:
+                continue
+            results.append({
+                "text": captured,
+                "start": start,
+                "end": end,
+                "type": entity_type,
+                "priority": priority,
+                "source": "regex",
+            })
+
     return results
 
 
@@ -242,5 +407,7 @@ def _default_ner_priority(entity_type: str) -> int:
         "CREDIT_CARD": 10,
         "US_SSN": 10,
         "CH_AHV": 10,
+        "HEALTH_DATA": 2,
+        "ICD_CODE": 2,
     }
     return _NER_PRIORITIES.get(entity_type, 5)

@@ -34,7 +34,7 @@ Detects PII in English, German, French, Italian, Spanish, Portuguese, and Dutch 
 
 ### Swiss-Native Patterns
 
-Built-in regex recognizers for AHV/AVS numbers (`756.XXXX.XXXX.XX`), Swiss IBANs (`CH56 0483 ...`), Zugangscodes (`ABCD-EFgh-IJKL-MNop`), CH postal codes, Swiss personal IDs, reference numbers, and insurance policy numbers — patterns that no other open-source redaction tool covers out of the box. All 24 regex patterns fire on every document regardless of language.
+Built-in regex recognizers for AHV/AVS numbers (`756.XXXX.XXXX.XX`), Swiss IBANs (`CH56 0483 ...`), Zugangscodes (`ABCD-EFgh-IJKL-MNop`), CH postal codes, Swiss personal IDs, reference numbers, and insurance policy numbers — patterns that no other open-source redaction tool covers out of the box. Three regex tiers fire on every document: **24 core patterns**, **6 label-context patterns** (detect PII by surrounding keywords like "Name:", "Patient:", "Versicherungs-Nr."), and **5 health/medical patterns** (ICD-10 codes, diagnoses, medications, allergies, blood types). Credit card detection uses **Luhn checksum validation** to eliminate false positives.
 
 ### LLM That Only Adds, Never Removes
 
@@ -46,15 +46,21 @@ An optional local LLM (any Ollama model — defaults to `qwen2.5:0.5b`) acts as 
 
 ### Layer 1 — Regex (instant, deterministic)
 
-Always runs. Covers 24 compiled patterns across three tiers:
+Always runs. Three pattern tiers:
+
+**Core patterns (24):**
 
 | Tier | Entity Types |
 |------|-------------|
 | 🇨🇭 **Swiss** | AHV/AVS (dot and space formats), IBAN CH, Zugangscode, CH postal code, CH personal ID, CH reference ID (10–13 digits), insurance number (3-3-3 format) |
 | 🇪🇺 **European** | US SSN, UK National Insurance, UK postcode, German Steuer-ID, French NIR, Italian Codice Fiscale, Spanish DNI, Spanish NIE, ICAO passport number |
-| 🌍 **Universal** | Email, international phone (E.164), any-country IBAN, credit card (13–19 digits), IPv4 address, date of birth (DD.MM.YYYY and YYYY-MM-DD) |
+| 🌍 **Universal** | Email, international phone (E.164), any-country IBAN, credit card (13–19 digits, **Luhn-validated**), IPv4 address, date of birth (DD.MM.YYYY and YYYY-MM-DD) |
 
-Priority: 10 (highest confidence, wins all merge conflicts). Source code: [`regex_patterns.py`](gocalma/regex_patterns.py).
+**Label-context patterns (6):** Detect PII by surrounding keywords — person name after "Name:"/"Herr"/"Frau", doctor name after "Dr."/"Arzt", insurance number after "Versicherungs-Nr."/"Police Nr.", DOB after "Geburtsdatum"/"Date of birth", ID/passport after "Pass-Nr."/"ID:", address after "Adresse:"/"Wohnort:". Priority: 7.
+
+**Health/medical patterns (5):** ICD-10 codes (e.g. `J06.9`), diagnosis context, medication context, allergy context, blood type detection. Priority: 2.
+
+Priority: 10 (core, highest confidence), 7 (label-context), 2 (health). Source code: [`regex_patterns.py`](gocalma/regex_patterns.py).
 
 ### Layer 2 — Multilingual BERT NER (fast, language-agnostic)
 
@@ -64,7 +70,9 @@ Priority: 10 (highest confidence, wins all merge conflicts). Source code: [`rege
 | Languages | EN, DE, FR, IT, ES, PT, NL |
 | Detects | PERSON, LOCATION, ORGANIZATION, DATE_TIME |
 | Priority | 6 (names), 5 (locations), 4 (organisations), 3 (dates) |
-| Max input | 4,500 characters (BERT 512-token limit) |
+| Max input | **Unlimited** — chunked inference with 460-token windows and 50-token overlap |
+
+Uses **chunked NER inference**: long documents are split into overlapping 460-token chunks using the tokenizer's offset mapping for exact character boundaries. Entities from overlap zones are deduplicated by span overlap and text identity, keeping the highest-scoring detection. This eliminates the previous 4,500-character truncation limit.
 
 Two alternative models selectable in Advanced: `dslim/bert-base-NER` (English-only) and `Davlan/xlm-roberta-large-ner-hrl` (XLM-RoBERTa Large). The pipeline lazily reloads when you switch. Source code: [`pii_detect.py`](gocalma/pii_detect.py).
 
@@ -76,9 +84,10 @@ Two alternative models selectable in Advanced: `dslim/bert-base-NER` (English-on
 | Default model | `qwen2.5:0.5b` (~400 MB) |
 | Role | Find PII that regex and NER missed |
 | Cannot dispute | PERSON, DATE_OF_BIRTH, CH_AHV, US_SSN, IBAN_CH, IBAN_INTL, CREDIT_CARD, or any regex-sourced entity |
+| Batch mode | **Single LLM call for all pages** — entities from every page verified in one request |
 | If unavailable | Skipped silently — NER results returned unchanged |
 
-The LLM selector in the Advanced panel shows every model you have pulled in Ollama. The verification prompt defaults to CONFIRMED and requires a reason for any FALSE_POSITIVE verdict. Source code: [`llm_detect.py`](gocalma/llm_detect.py).
+Uses **batch verification**: instead of one LLM round-trip per page, all non-protected entities across every page are sent in a single call with a combined text excerpt (up to 8,000 chars). This reduces latency proportional to page count. The LLM selector in the Advanced panel shows every model you have pulled in Ollama. The verification prompt defaults to CONFIRMED and requires a reason for any FALSE_POSITIVE verdict. Source code: [`llm_detect.py`](gocalma/llm_detect.py).
 
 ### Merge & Filter
 
@@ -116,7 +125,7 @@ Displayed as: **High** (green, ≥0.90) / **Medium** (amber, ≥0.70) / **Low** 
 | IBAN_CH | `CH56 0483 5012 3456 7800 9` | Regex | 10 | 🇨🇭 |
 | IBAN_INTL | `DE89 3704 0044 0532 0130 00` | Regex | 10 | 🌍 |
 | US_SSN | `123-45-6789` | Regex | 10 | 🌍 |
-| CREDIT_CARD | `4111-1111-1111-1111` | Regex | 10 | 🌍 |
+| CREDIT_CARD | `4111-1111-1111-1111` | Regex (Luhn-validated) | 10 | 🌍 |
 | CH_ZUGANGSCODE | `ABCD-EFgh-IJKL-MNop` | Regex | 9 | 🇨🇭 |
 | CH_ID_NUMBER | `12-3456-78` | Regex | 9 | 🇨🇭 |
 | CH_REFERENCE_ID | `100000000000` | Regex | 9 | 🇨🇭 |
@@ -138,6 +147,15 @@ Displayed as: **High** (green, ≥0.90) / **Medium** (amber, ≥0.70) / **Low** 
 | ORGANIZATION | `Helsana AG` | NER | 4 | 🌍 |
 | DATE_OF_BIRTH | `26.03.1975` | Regex | 3 | 🌍 |
 | DATE_TIME | `26. März 1975` | NER | 3 | 🌍 |
+| PERSON (label) | `Max Muster` (after "Name:") | Label-context regex | 7 | 🌍 |
+| DOCTOR_NAME | `Dr. med. Müller` (after "Arzt:") | Label-context regex | 7 | 🌍 |
+| INSURANCE_NUMBER (label) | `100 452 956` (after "Versicherungs-Nr.") | Label-context regex | 7 | 🇨🇭 |
+| DATE_OF_BIRTH (label) | `01.01.1990` (after "Geburtsdatum:") | Label-context regex | 7 | 🌍 |
+| ID_NUMBER (label) | `X12345678` (after "Pass-Nr.") | Label-context regex | 7 | 🌍 |
+| ADDRESS (label) | `Musterstrasse 1` (after "Adresse:") | Label-context regex | 7 | 🌍 |
+| ICD_CODE | `J06.9`, `M54.5` | Health regex | 2 | 🌍 |
+| HEALTH_DATA | `Diagnose: Bronchitis` | Health regex | 2 | 🌍 |
+| BLOOD_TYPE | `Blutgruppe: A+` | Health regex | 2 | 🌍 |
 
 Swiss-specific patterns fire on every document regardless of language.
 
@@ -153,7 +171,7 @@ Swiss-specific patterns fire on every document regardless of language.
 | **replace** | `<PERSON>` | Yes | Default mode |
 | **mask** | `****` | Yes | Length matches original |
 | **hash** | `[#a3f2c1...]` | Yes | Salted HMAC-SHA256, key stored in `.gocalma` |
-| **encrypt** | `[enc:PERSON_a3]` | Yes | Fernet-encrypted label |
+| **encrypt** | `[enc:PERSON_a3]` | Yes | AES-256-GCM encrypted label |
 | **highlight** | Yellow highlight | Yes | Text stays visible |
 | **synthesize** | "John Doe", "redacted@example.com" | Yes | Synthetic placeholder per entity type |
 
@@ -208,7 +226,7 @@ No external API calls. No telemetry. No network requests during processing.
 | **Retention** | Zero — documents processed in memory only |
 | **Third-party APIs** | None — all inference is local (BERT, Flan-T5, Ollama) |
 | **Audit trail** | Timestamped JSON per redaction — entity types and counts only, no document content |
-| **Encryption** | AES-128-CBC + HMAC-SHA256 (Fernet) with PBKDF2 key derivation |
+| **Encryption** | AES-256-GCM (authenticated encryption) with PBKDF2 key derivation |
 | **Key derivation** | PBKDF2-HMAC-SHA256, 480,000 iterations (OWASP 2024 recommendation) |
 | **Upload cap** | 50 MB |
 | **Prompt injection guard** | Document content wrapped in `<document_content>` delimiters, model output validated |
@@ -227,14 +245,14 @@ flowchart TD
     OCR -->|Yes| Regex[Regex pass — 24 patterns]
     OCR -->|No| SuryaOCR[OCR via Surya / Tesseract]
     SuryaOCR --> Regex
-    Regex --> NER[Multilingual BERT NER]
+    Regex --> NER[Chunked BERT NER — 460-token windows]
     NER --> Merge[Merge + priority dedup + false-positive filters]
     Merge --> Confidence[Compute confidence scores]
     Confidence --> Risk[Risk summary — Flan-T5]
     Risk --> LLMCheck{Ollama available?}
     LLMCheck -->|No| Review
     LLMCheck -->|Yes| Classify[Classify document type]
-    Classify --> LLMVerify[LLM verify — additive only]
+    Classify --> LLMVerify[Batch LLM verify — all pages, single call]
     LLMVerify --> Review[Interactive review table]
     Review --> Redact[Apply de-identification]
     Redact --> Output[Redacted PDF + audit log + key file]
@@ -265,15 +283,14 @@ Word bounding boxes from OCR are stored with exact character offsets, ensuring r
 
 ```mermaid
 sequenceDiagram
-    participant Regex as Regex + NER
+    participant Regex as Regex + Chunked NER
     participant LLM as Local LLM (Ollama)
     participant User as Review Table
 
-    Regex->>User: Entity list with confidence scores
-    User->>LLM: Verify non-protected entities + find missed PII
+    Regex->>LLM: All non-protected entities from all pages (single batch call)
     LLM->>User: Verdicts + new entities
-    Note over User: Protected types (PERSON, AHV, IBAN...) never sent to LLM
-    Note over User: LLM disputes without reason → overridden to CONFIRMED
+    Note over Regex,LLM: Protected types (PERSON, AHV, IBAN...) bypass LLM entirely
+    Note over LLM,User: LLM disputes without reason → overridden to CONFIRMED
     Note over User: New LLM entities tagged with LLM badge
 ```
 
@@ -284,30 +301,31 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     subgraph KeyGen [Key file generation]
-        DataKey[Random Fernet data key]
+        DataKey["Random 256-bit data key"]
         Mapping[Redaction mapping JSON]
-        DataKey --> EncryptMap[Encrypt mapping with data key]
+        DataKey --> EncryptMap["AES-256-GCM encrypt mapping"]
     end
     subgraph WithPassword [With passphrase]
         Password[User passphrase]
         Salt[Random 16-byte salt]
-        Password --> PBKDF2["PBKDF2-HMAC-SHA256 (480k iterations)"]
+        Password --> PBKDF2["PBKDF2-HMAC-SHA256 (480k iterations, 256-bit)"]
         Salt --> PBKDF2
-        PBKDF2 --> DerivedKey[Derived key]
-        DerivedKey --> EncryptDataKey[Encrypt data key]
-        EncryptDataKey --> V2File[".gocalma v2: salt + encrypted key + ciphertext"]
+        PBKDF2 --> DerivedKey[Derived 256-bit key]
+        DerivedKey --> EncryptDataKey["AES-256-GCM wrap data key"]
+        EncryptDataKey --> V3File[".gocalma v3: salt + nonce + encrypted key + ciphertext"]
     end
     subgraph WithoutPassword [Without passphrase]
-        DataKey --> V1File[".gocalma v1: raw key + ciphertext"]
+        DataKey --> V3FileNoPw[".gocalma v3: raw key + ciphertext"]
     end
-    EncryptMap --> V2File
-    EncryptMap --> V1File
+    EncryptMap --> V3File
+    EncryptMap --> V3FileNoPw
 ```
 
 **Security details:**
-- Encryption: Fernet (AES-128-CBC + HMAC-SHA256) via Python `cryptography` library
-- Key derivation: PBKDF2-HMAC-SHA256 with random 16-byte salt, 480,000 iterations
-- File format: `.gocalma` v1 (no password) or v2 (password-protected)
+- Encryption: **AES-256-GCM** (authenticated encryption with 96-bit random nonces) via Python `cryptography` library
+- Key derivation: PBKDF2-HMAC-SHA256 with random 16-byte salt, 480,000 iterations, 256-bit output
+- File format: `.gocalma` v3 (current, AES-256-GCM), with backward-compatible reading of legacy v1/v2 (Fernet) files
+- Credit card validation: **Luhn checksum** eliminates false positives from digit sequences
 - Upload size capped at 50 MB
 - LLM prompt-injection guard: `<document_content>` delimiters
 - LLM hallucination filter: entities whose text doesn't appear in the source are discarded
@@ -404,19 +422,19 @@ gocalma-redact/
 │   └── run_benchmark.py            Standalone NER model benchmarking tool
 ├── tests/
 │   ├── test_recognizers.py         Regex, merge, confidence, LLM protection, false positives
-│   ├── test_llm_detect.py          LLM prompt parsing, doc classification, entity protection
-│   ├── test_pii_detect.py          NER pipeline, deduplication, language detection
+│   ├── test_llm_detect.py          LLM prompt parsing, doc classification, batch verification
+│   ├── test_pii_detect.py          Chunked NER, deduplication, language detection
 │   ├── test_pdf_extract.py         PDF extraction, OCR, page limits
 │   ├── test_redactor.py            All 7 de-id modes, reversibility, HMAC hash
-│   └── test_crypto.py              Fernet encryption, PBKDF2, key file formats
+│   └── test_crypto.py              AES-256-GCM encryption, PBKDF2, key file formats, legacy compat
 └── gocalma/
-    ├── pii_detect.py               Multilingual BERT NER + confidence scoring
-    ├── regex_patterns.py           24 compiled patterns + priority merge + filters
-    ├── llm_detect.py               Ollama LLM verification — additive only, entity protection
+    ├── pii_detect.py               Chunked BERT NER + confidence scoring
+    ├── regex_patterns.py           24 core + 6 label-context + 5 health patterns, Luhn validation
+    ├── llm_detect.py               Ollama LLM batch verification — additive only, entity protection
     ├── summariser.py               Flan-T5 risk summary (critical / moderate / low)
     ├── audit.py                    GDPR audit trail — metadata only, no document content
     ├── redactor.py                 7 de-id modes, OCR-aware, reversible annotations
-    ├── crypto.py                   Fernet + PBKDF2-480k, .gocalma key file format
+    ├── crypto.py                   AES-256-GCM + PBKDF2-480k, .gocalma v3 key file format
     ├── pdf_extract.py              PyMuPDF text extraction + Surya/Tesseract OCR
     └── components/
         ├── pdf_viewer.py           Streamlit component wrapper
@@ -424,7 +442,7 @@ gocalma-redact/
             └── index.html          Interactive PDF viewer (hover + double-click)
 ```
 
-**Test suite:** 179 tests across 6 test files. Run with `python -m pytest tests/ -v`.
+**Test suite:** 185 tests across 6 test files. Run with `python -m pytest tests/ -v`.
 
 ---
 
