@@ -511,23 +511,6 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Cloud deployment privacy banner
-# ---------------------------------------------------------------------------
-
-import os as _os
-
-_IS_HF_SPACE = _os.environ.get("SPACE_ID") is not None
-
-if _IS_HF_SPACE:
-    st.info(
-        "**Cloud demo** — This app is running on Hugging Face Spaces. "
-        "Uploaded files are processed in an ephemeral container and **never stored**, "
-        "but are not on your own hardware. LLM verification is disabled (local-only feature). "
-        "For maximum privacy, [run GoCalma locally](https://github.com/alallaqi/gocalma-redact).",
-        icon="☁️",
-    )
-
-# ---------------------------------------------------------------------------
 # Main content — switches between Redact and De-redact based on sidebar mode
 # ---------------------------------------------------------------------------
 
