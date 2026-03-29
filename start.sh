@@ -34,9 +34,16 @@ if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
         docker compose up --build
     fi
 else
-    echo -e "${YELLOW}Docker not found or not running.${NC}"
-    echo ""
-    echo "To run manually:"
+    if command -v docker &>/dev/null; then
+        echo -e "${YELLOW}Docker is installed but not running.${NC}"
+        echo -e "Open ${GREEN}Docker Desktop${NC} and wait for it to start, then re-run this script."
+        echo ""
+    else
+        echo -e "${YELLOW}Docker not found.${NC}"
+        echo -e "Install it from: ${GREEN}https://docker.com/products/docker-desktop/${NC}"
+        echo ""
+    fi
+    echo "Or run manually without Docker:"
     echo ""
     echo -e "  ${GREEN}1.${NC} Create a virtual environment:"
     echo "     python3 -m venv .venv"

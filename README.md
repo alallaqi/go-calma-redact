@@ -335,6 +335,8 @@ flowchart TD
 
 One command, everything included. NER model and Flan-T5 are pre-baked into the image — first run is instant.
 
+> **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running (whale icon visible in your menu bar / system tray).
+
 ```bash
 git clone https://github.com/alallaqi/gocalma-redact
 cd gocalma-redact
