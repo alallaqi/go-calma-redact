@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -19,7 +20,7 @@ from gocalma.pii_detect import PIIEntity
 # Ollama configuration
 # ---------------------------------------------------------------------------
 
-_OLLAMA_BASE_URL = "http://localhost:11434"
+_OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 _OLLAMA_TIMEOUT = 2  # seconds for connectivity check
 
 # Currently selected Ollama model

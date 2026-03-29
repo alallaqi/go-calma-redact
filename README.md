@@ -1,7 +1,6 @@
 # GoCalma Redact 🔒
 
-[![Live App](https://img.shields.io/badge/Live_App-PLACEHOLDER-blue?style=for-the-badge)](PLACEHOLDER)
-[![Demo Video](https://img.shields.io/badge/Demo_Video-PLACEHOLDER-red?style=for-the-badge)](PLACEHOLDER)
+[![Docker](https://img.shields.io/badge/Docker-One_Command_Setup-blue?style=for-the-badge)]()
 [![GDPR Compliant](https://img.shields.io/badge/GDPR-Compliant-green?style=for-the-badge)]()
 [![Local AI](https://img.shields.io/badge/Local_AI-100%25_Offline-purple?style=for-the-badge)]()
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
@@ -14,8 +13,9 @@ The only redaction tool that covers AHV numbers, Zugangscodes, and Swiss IBANs n
 
 ## Try It (2 Minutes)
 
-1. Open [Live App → PLACEHOLDER]
-2. Upload any PDF with personal information
+1. Run `./start.sh` (or `docker compose up` if Docker is installed)
+2. Open http://localhost:8501
+3. Upload any PDF with personal information
 3. See detected PII with risk severity — **Critical** / **Moderate** / **Low**
 4. Review entities, toggle off any false positives
 5. Choose redaction mode and click **Redact**
@@ -200,19 +200,14 @@ Upload the redacted PDF together with its `.gocalma` key file. The mode is auto-
 
 ## Privacy Architecture
 
-### 100% Local (default)
+### 100% Local
 
-Everything runs on your machine. Nothing leaves it.
-
-```bash
-streamlit run app.py
-# → http://localhost:8501
-```
+Everything runs on your machine. Nothing leaves it — not even during model loading (models are baked into the Docker image at build time).
 
 All AI models run locally:
-- **Multilingual BERT NER:** ~700 MB (downloads once on first use, cached in `~/.cache/huggingface`)
-- **Flan-T5 risk summariser:** 77 MB (downloads once)
-- **Qwen2.5 LLM** (optional): pulled via Ollama
+- **Multilingual BERT NER:** ~680 MB (pre-downloaded in Docker image)
+- **Flan-T5 risk summariser:** ~77 MB (pre-downloaded in Docker image)
+- **Qwen2.5 LLM** (optional): pulled via Ollama sidecar container
 
 No external API calls. No telemetry. No network requests during processing.
 
@@ -223,7 +218,7 @@ No external API calls. No telemetry. No network requests during processing.
 | Feature | Detail |
 |---------|--------|
 | **Data residency** | 100% local — no data leaves your machine |
-| **Retention** | Zero — documents processed in memory only |
+| **Retention** | Zero — documents processed in memory only, never written to disk |
 | **Third-party APIs** | None — all inference is local (BERT, Flan-T5, Ollama) |
 | **Audit trail** | Timestamped JSON per redaction — entity types and counts only, no document content |
 | **Encryption** | AES-256-GCM (authenticated encryption) with PBKDF2 key derivation |
@@ -336,11 +331,46 @@ flowchart TD
 
 ## Quick Start
 
-### Option A — Local (Python 3.9+)
+### Option A — Docker (recommended)
+
+One command, everything included. NER model and Flan-T5 are pre-baked into the image — first run is instant.
+
+> **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running (whale icon visible in your menu bar / system tray).
 
 ```bash
-git clone https://github.com/alallaqi/go-calma-redact
-cd go-calma-redact
+git clone https://github.com/alallaqi/gocalma-redact
+cd gocalma-redact
+./start.sh
+# → http://localhost:8501
+```
+
+Or run directly with Docker Compose:
+
+```bash
+# NER only (regex + BERT, no LLM) — fastest
+docker compose up --build
+
+# With LLM verification (adds Ollama + qwen2.5:1.5b)
+docker compose --profile ollama up --build
+```
+
+> **Windows:** Run `start.bat` instead of `./start.sh`.
+
+The Docker image includes:
+- Tesseract OCR with DE/FR/IT/EN language packs
+- Multilingual BERT NER model (~680 MB, pre-downloaded)
+- Flan-T5 risk summariser (~77 MB, pre-downloaded)
+
+The `ollama` profile adds:
+- Ollama server with persistent model volume
+- Auto-pull of `qwen2.5:1.5b` on first run (~1.5 GB)
+- `OLLAMA_HOST` auto-configured so the app finds it
+
+### Option B — Manual (Python 3.9+)
+
+```bash
+git clone https://github.com/alallaqi/gocalma-redact
+cd gocalma-redact
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -348,9 +378,9 @@ streamlit run app.py
 # → http://localhost:8501
 ```
 
-> **First run:** The multilingual BERT NER model (~700 MB) and Flan-T5 summariser (~77 MB) download automatically on first use and are cached locally. Subsequent runs are instant.
+> **First run:** The multilingual BERT NER model (~680 MB) and Flan-T5 summariser (~77 MB) download automatically on first use and are cached in `~/.cache/huggingface`.
 
-### Option B — With LLM verification
+### Adding LLM verification (optional)
 
 ```bash
 # Install Ollama
@@ -359,21 +389,23 @@ brew install ollama    # macOS
 
 # Start Ollama and pull a model
 ollama serve
-ollama pull qwen2.5:0.5b    # 400 MB, fastest
-# or: ollama pull qwen2.5:1.5b   # 1.5 GB, more accurate
+ollama pull qwen2.5:1.5b   # 1.5 GB, recommended
+# or: ollama pull qwen2.5:0.5b   # 400 MB, fastest
 
 # Run the app — it auto-detects Ollama
 streamlit run app.py
 ```
 
-### OCR for scanned PDFs (pick one)
+### OCR for scanned PDFs (manual install only)
 
-**Option A — Surya (recommended, pure pip)**
+Docker includes Tesseract automatically. For manual installs, pick one:
+
+**Surya (recommended, pure pip)**
 ```bash
 pip install "surya-ocr<0.5"
 ```
 
-**Option B — Tesseract (fallback)**
+**Tesseract (fallback)**
 ```bash
 # macOS
 brew install tesseract tesseract-lang
@@ -413,6 +445,9 @@ The LLM dropdown shows every model you have pulled in Ollama. Any Ollama-compati
 ```
 gocalma-redact/
 ├── app.py                          Streamlit UI — upload, review, redact, de-redact
+├── Dockerfile                      Pre-baked NER + Flan-T5, Tesseract OCR
+├── docker-compose.yml              Default + ollama profile
+├── start.sh / start.bat            One-command launcher (Docker or manual fallback)
 ├── requirements.txt
 ├── IMPROVEMENTS.md
 ├── assets/

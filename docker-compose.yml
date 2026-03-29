@@ -1,0 +1,42 @@
+services:
+  gocalma:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+        required: false
+    restart: unless-stopped
+
+  # --- Ollama profile: activate with `docker compose --profile ollama up` ---
+
+  ollama:
+    image: ollama/ollama
+    profiles: ["ollama"]
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama
+    profiles: ["ollama"]
+    depends_on:
+      - ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Ollama to be ready..."
+        until ollama list 2>/dev/null; do sleep 1; done
+        echo "Pulling qwen2.5:1.5b..."
+        OLLAMA_HOST=http://ollama:11434 ollama pull qwen2.5:1.5b
+        echo "Model ready."
+
+volumes:
+  ollama_models:
