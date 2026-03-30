@@ -449,7 +449,10 @@ The LLM dropdown shows every model you have pulled in Ollama. Any Ollama-compati
 
 ```
 gocalma-redact/
-├── app.py                          Streamlit UI — upload, review, redact, de-redact
+├── app.py                          Streamlit entry point — step orchestration, sidebar, routing
+├── ui/
+│   ├── styles.py                   Brand palette, entity colors, CSS theme injection
+│   └── review.py                   Entity review table, risk summary rendering
 ├── Dockerfile                      Pre-baked NER + Flan-T5, Tesseract OCR
 ├── docker-compose.yml              Default + ollama profile
 ├── start.sh / start.bat            One-command launcher (Docker or manual fallback)

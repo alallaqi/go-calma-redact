@@ -25,6 +25,7 @@ RUN python -c "from transformers import pipeline; pipeline('text2text-generation
 
 # Copy application source
 COPY app.py .
+COPY ui/ ui/
 COPY gocalma/ gocalma/
 COPY assets/ assets/
 COPY .streamlit/ .streamlit/
