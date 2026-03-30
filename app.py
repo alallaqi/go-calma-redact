@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from pathlib import Path
 
 import streamlit as st
@@ -131,6 +132,15 @@ st.set_page_config(
     page_icon=str(FAVICON_PATH) if FAVICON_PATH.exists() else "🛡️",
     layout="wide",
 )
+
+# Cloud demo notice — only shown on Hugging Face Spaces
+if os.environ.get("SPACE_ID"):
+    st.info(
+        "**Cloud demo** — your uploads are processed on this server and not stored, "
+        "but for maximum privacy run GoCalma locally. "
+        "[GitHub →](https://github.com/alallaqi/gocalma-redact)",
+        icon="☁️",
+    )
 
 st.markdown(f"""
 <style>
