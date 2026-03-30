@@ -14,9 +14,9 @@ The only redaction tool that covers AHV numbers, Zugangscodes, and Swiss IBANs n
 
 ## Try It
 
-**[Live Demo →](https://huggingface.co/spaces/al-allaqi/gocalma-redact)** — runs in your browser, no install needed. NER + regex detection only (LLM verification requires local Ollama).
+**[Live Demo →](https://huggingface.co/spaces/al-allaqi/gocalma-redact)** — deployed on Hugging Face Spaces, runs in your browser with no install needed. NER + regex detection only (LLM verification requires local Ollama).
 
-Or run locally with full LLM support:
+Or run locally in one command via Docker (`./start.sh`) with full LLM support:
 
 1. Run `./start.sh` (or `docker compose up` if Docker is installed)
 2. Open http://localhost:8501

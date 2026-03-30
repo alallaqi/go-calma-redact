@@ -1,180 +1,111 @@
-# GoCalma Redact — Improvement Backlog
+# GoCalma Redact — Improvements & Status
 
-This file tracks known improvements and future feature ideas to circle back on.
-Items are grouped by area and roughly ordered by impact.
-
----
-
-## NLP / PII Detection
-
-### Multilingual NLP engine support
-**Status:** Not started
-**Priority:** High
-The current Presidio setup hardcodes `lang_code: "en"` even though the app targets Swiss/German
-documents. Add German (`de`) and multilingual model options so entities like names and addresses
-in German text are detected with higher recall.
-
-Steps:
-- Add `spacy/de_core_news_lg` and `spacy/xx_ent_wiki_sm` (multilingual) to `NLP_MODELS`
-- Auto-detect language of each page (`langdetect` is already in the venv) and pass the correct
-  `language=` parameter to `detect_pii`
-- Add German address/postal patterns to `_SWISS_RECOGNIZERS`
+This file tracks implemented improvements, current capabilities, and future ideas.
 
 ---
 
-### Smarter Swiss postal code matching
-**Status:** Partially improved (lookahead added)
-**Priority:** Medium
-The `CH_POSTAL` pattern (`\b[1-9]\d{3}(?=\s+[A-ZÄÖÜ][a-zäöüß])`) still flags some
-non-postal 4-digit numbers. Improve by:
-- Bundling a static list of the ~3 500 Swiss postal codes for exact matching
-- Raising the confidence score for exact matches
+## Completed
 
----
+### Multilingual NER Detection
+**Status:** Done
+Replaced single-language Presidio/spaCy with a multilingual BERT model (`Davlan/bert-base-multilingual-cased-ner-hrl`) that handles EN, DE, FR, IT, ES, PT, and NL natively. Two additional models selectable in the UI: `dslim/bert-base-NER` (English-only, faster) and `Davlan/xlm-roberta-large-ner-hrl` (highest accuracy). Language is auto-detected per page via `langdetect`.
 
-### LLM page-text chunking
-**Status:** Not started
-**Priority:** Medium
-`llm_detect.py` truncates page text to 3 000 characters. Dense legal / medical pages can
-be longer. Implement chunking: split the page into overlapping windows that each fit in the
-model's context, run verification on each window, and merge results de-duplicating overlaps.
+### Chunked NER Inference
+**Status:** Done
+BERT NER now uses chunked inference with 460-token windows and 50-token overlap, eliminating the previous 4,500-character truncation limit. Documents of any length are processed correctly. Entities from overlap zones are deduplicated by span overlap and text identity.
 
----
+### Swiss-Native Regex Patterns (35 patterns across 3 tiers)
+**Status:** Done
+- **24 core patterns:** AHV/AVS (dot + space formats), Swiss IBAN, Zugangscode, CH postal code, CH personal ID, CH reference ID, insurance number (3-3-3), US SSN, UK NI, German Steuer-ID, French NIR, Italian Codice Fiscale, Spanish DNI/NIE, ICAO passport, email, international phone (E.164), any-country IBAN, credit card (Luhn-validated), IPv4, date of birth
+- **6 label-context patterns:** Detect PII by surrounding keywords — "Name:", "Herr"/"Frau", "Versicherungs-Nr.", "Geburtsdatum", "Pass-Nr.", "Adresse:"
+- **5 health/medical patterns:** ICD-10 codes, diagnosis context, medication context, allergy context, blood type
 
-### Multilingual LLM models
-**Status:** Not started
-**Priority:** Low
-`LLM_MODELS` currently only lists Mistral-7B. Add multilingual options:
-- `Mistral-7B-Instruct-v0.3` (already there, handles German reasonably)
-- `mistralai/Mixtral-8x7B-Instruct-v0.1` for higher accuracy
-- Remote API option (Claude / GPT-4) with a clear privacy warning that data leaves the machine
+### Credit Card Luhn Validation
+**Status:** Done
+Credit card regex now validates the Luhn checksum, eliminating false positives from arbitrary digit sequences.
 
----
+### AES-256-GCM Encryption
+**Status:** Done
+Replaced Fernet (AES-128-CBC + HMAC-SHA256) with AES-256-GCM authenticated encryption. Key files use `.gocalma` v3 format with 96-bit random nonces and 32-byte keys. Password-protected key files use PBKDF2-HMAC-SHA256 with 480,000 iterations and random 16-byte salt. Backward-compatible reading of legacy v1/v2 Fernet files preserved.
 
-## Performance
+### LLM Verification — Additive Only, Batch Mode
+**Status:** Done
+Optional local LLM (any Ollama model) acts as a second pass. The LLM can never dispute protected entity types (PERSON, AHV, IBAN, SSN, credit card, DOB) or regex-sourced entities. Uses **batch verification** — all non-protected entities across every page sent in a single LLM call (up to 8,000 chars combined), reducing latency proportional to page count. Falls back silently if Ollama is unavailable.
 
-### PDF document cache
-**Status:** Not started
-**Priority:** Medium
-Each call to `render_page`, `extract_words`, `map_words_to_entities`, etc. independently
-opens and parses the same PDF bytes. A simple `functools.lru_cache` keyed on `hash(pdf_bytes)`
-would eliminate repeated I/O on the hot path during interactive review.
+### Document-Type Classification
+**Status:** Done
+LLM classifies documents as insurance, medical, police, tax, government, or general. Domain-specific context is injected into verification prompts to improve recall for sector-specific PII (policy numbers, patient IDs, case numbers, etc.).
 
-Implementation sketch:
-```python
-import functools, hashlib, fitz
+### Context-Aware False Positive Filters
+**Status:** Done
+Automatic filters for: country names in product descriptions, abbreviation table entries, premium region codes, generic street names without house numbers. Computed confidence scores replace raw NER token probabilities, incorporating source type, entity type floors, span length, context keywords, and repetition signals.
 
-@functools.lru_cache(maxsize=4)
-def _open_doc(pdf_hash: str, pdf_bytes: bytes) -> fitz.Document:
-    return fitz.open(stream=pdf_bytes, filetype="pdf")
-```
-The `pdf_hash` key prevents stale cache hits; `maxsize=4` keeps at most 4 PDFs in memory.
+### Docker One-Command Setup
+**Status:** Done
+Complete Docker deployment with pre-baked models:
+- `Dockerfile` — Python 3.11-slim with Tesseract OCR (DE/FR/IT/EN), multilingual BERT NER (~680 MB), and Flan-T5 summariser (~77 MB) pre-downloaded at build time. First run is instant.
+- `docker-compose.yml` — Default profile (NER + regex only) and `ollama` profile that adds an Ollama sidecar with auto-pull of `qwen2.5:1.5b`.
+- `start.sh` / `start.bat` — Interactive launcher that detects Docker, offers NER-only vs LLM mode, and falls back to manual instructions.
 
----
-
-### Async / background NER for large documents
-**Status:** Not started
-**Priority:** Low
-For documents >20 pages, run NER in a background thread and stream results page-by-page
-into the UI using `st.empty()` placeholders, so the user sees partial results immediately
-rather than waiting for all pages to finish.
-
----
-
-## Security
-
-### Mypy strict typing in CI
-**Status:** Not started
-**Priority:** Low
-All source files use `from __future__ import annotations`. Adding `mypy --strict` to a
-GitHub Actions workflow would catch type errors before they reach production.
-
-Config (`pyproject.toml`):
-```toml
-[tool.mypy]
-strict = true
-python_version = "3.10"
+```bash
+./start.sh          # interactive launcher
+# or
+docker compose up   # NER only
+docker compose --profile ollama up  # with LLM
 ```
 
+### Hugging Face Spaces Deployment
+**Status:** Live at [huggingface.co/spaces/al-allaqi/gocalma-redact](https://huggingface.co/spaces/al-allaqi/gocalma-redact)
+Cloud demo running on HF Spaces (Docker SDK). Includes NER + regex detection with a cloud privacy notice banner. LLM verification is local-only (requires Ollama). The HF deployment uses a separate Dockerfile optimised for the Spaces environment (non-root user, port 7860, CPU-only PyTorch).
+
+### OCR Pipeline
+**Status:** Done
+Automatic OCR for scanned/image-only PDFs via Surya (transformer-based, preferred) or Tesseract (fallback). Word bounding boxes stored with exact character offsets for precise redaction. Docker image includes Tesseract with DE/FR/IT/EN language packs.
+
+### 7 De-identification Modes
+**Status:** Done
+Redact (black box), replace (`<PERSON>`), mask (`****`), hash (salted HMAC-SHA256), encrypt (AES-256-GCM label), highlight (yellow), synthesize (fake data). All modes are reversible via the encrypted `.gocalma` key file.
+
+### GDPR Audit Trail
+**Status:** Done
+Timestamped JSON audit log per redaction recording entity type counts, severity classification, redaction mode, and model used. No document content is ever stored in the audit log.
+
+### Comprehensive Test Suite
+**Status:** Done — 185 tests across 6 test files
+- `test_recognizers.py` — Regex, merge, confidence, LLM protection, false positives
+- `test_llm_detect.py` — LLM prompt parsing, doc classification, batch verification
+- `test_pii_detect.py` — Chunked NER, deduplication, language detection
+- `test_pdf_extract.py` — PDF extraction, OCR, page limits
+- `test_redactor.py` — All 7 de-id modes, reversibility, HMAC hash
+- `test_crypto.py` — AES-256-GCM encryption, PBKDF2, key file formats, legacy compat
+
+### Documentation
+**Status:** Done
+- `README.md` — Full feature documentation, detection pipeline, security model, quick start
+- `ARCHITECTURE.md` — Module dependency graph, pipeline diagrams, design decisions
+- `CONTRIBUTING.md` — Dev setup, how-to guides, security invariants, PR guidelines
+
 ---
 
-### Rate-limit / size guard for OCR
-**Status:** Partially done (DPI lowered to 200, file size capped at 50 MB)
-**Priority:** Low
-For very long scanned PDFs the sequential OCR loop still holds each rendered pixmap in memory
-until the page is processed. Explicitly `del pix` after `image_to_string` returns to release
-memory immediately:
-```python
-pix = page.get_pixmap(dpi=dpi)
-png_bytes = pix.tobytes("png")
-del pix   # release ~6 MB immediately
-img = Image.open(io.BytesIO(png_bytes))
+## Future Ideas
+
+### Batch / CLI Mode
+Add a command-line interface for automated pipelines:
+```
+python -m gocalma redact input.pdf --approach replace --output redacted.pdf
 ```
 
----
+### CI / CD Pipeline
+GitHub Actions workflow: pytest, mypy --strict, coverage report.
 
-## UX / Features
+### React / Vanilla JS Frontend
+Replace Streamlit with a standalone frontend for Vercel deployment.
 
-### Undo / redo for manual word toggles
-**Status:** Not started
-**Priority:** Medium
-The interactive viewer lets users double-click to toggle individual words, but there is no
-undo. Store a toggle history in session state (`st.session_state.toggle_history`) and add
-an "Undo last change" button.
+### Confidence Threshold Slider
+Expose `score_threshold` as a sidebar slider so users can tune sensitivity.
 
----
+### Undo / Redo for Manual Word Toggles
+Store toggle history in session state with an undo button.
 
-### Batch / CLI mode
-**Status:** Not started
-**Priority:** Medium
-Add a command-line interface so GoCalma can be used in automated pipelines:
-```
-python -m gocalma redact input.pdf --approach replace --output redacted.pdf --key-file key.gocalma
-```
-The `gocalma/` module already exposes all the building blocks; a thin `__main__.py` would
-wire them together without touching the Streamlit UI.
-
----
-
-### Confidence threshold slider in UI
-**Status:** Not started
-**Priority:** Low
-Expose the `score_threshold` parameter (currently hardcoded to 0.35) as a sidebar slider
-so users can tune sensitivity without editing code.
-
----
-
-### Export review report
-**Status:** Not started
-**Priority:** Low
-Allow users to download a CSV / JSON report of all detected entities (type, text snippet,
-page, confidence score, approved/rejected) alongside the redacted PDF for audit purposes.
-
----
-
-## Developer Experience
-
-### CI / CD pipeline
-**Status:** Not started
-**Priority:** Medium
-Add a GitHub Actions workflow that:
-1. Installs dependencies
-2. Runs `pytest tests/`
-3. Runs `mypy --strict gocalma/`
-4. Uploads coverage report
-
----
-
-### Docker image
-**Status:** Not started
-**Priority:** Low
-Provide a `Dockerfile` that pre-installs all dependencies (including the spaCy model) so
-users can run GoCalma with a single `docker run` without managing a Python environment.
-
----
-
-### Changelog
-**Status:** Not started
-**Priority:** Low
-Add a `CHANGELOG.md` following Keep a Changelog conventions to track versions and changes
-for external users.
+### Swiss Postal Code Exact Matching
+Bundle the ~3,500 Swiss postal codes for exact matching instead of regex-only.
