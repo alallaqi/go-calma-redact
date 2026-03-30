@@ -138,7 +138,7 @@ if os.environ.get("SPACE_ID"):
     st.info(
         "**Cloud demo** — your uploads are processed on this server and not stored, "
         "but for maximum privacy run GoCalma locally. "
-        "[GitHub →](https://github.com/alallaqi/gocalma-redact)",
+        "[GitHub →](https://github.com/alallaqi/go-calma-redact)",
         icon="☁️",
     )
 

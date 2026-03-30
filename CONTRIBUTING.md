@@ -12,7 +12,7 @@ Thanks for your interest in contributing. This guide covers how to set up the pr
 ## Development Setup
 
 ```bash
-git clone https://github.com/alallaqi/gocalma-redact
+git clone https://github.com/alallaqi/go-calma-redact
 cd gocalma-redact
 python -m venv .venv
 source .venv/bin/activate    # Windows: .venv\Scripts\activate

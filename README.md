@@ -343,7 +343,7 @@ One command, everything included. NER model and Flan-T5 are pre-baked into the i
 > **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running (whale icon visible in your menu bar / system tray).
 
 ```bash
-git clone https://github.com/alallaqi/gocalma-redact
+git clone https://github.com/alallaqi/go-calma-redact
 cd gocalma-redact
 ./start.sh
 # → http://localhost:8501
@@ -374,7 +374,7 @@ The `ollama` profile adds:
 ### Option B — Manual (Python 3.9+)
 
 ```bash
-git clone https://github.com/alallaqi/gocalma-redact
+git clone https://github.com/alallaqi/go-calma-redact
 cd gocalma-redact
 python -m venv .venv
 source .venv/bin/activate
