@@ -332,6 +332,73 @@ class TestVerifyEntities:
             mod.LLM_AVAILABLE = original_flag
 
 
+class TestParseNewEntities:
+    def test_parse_new_line(self):
+        from gocalma.llm_detect import _parse_new_entities
+        raw = "NEW - PERSON - Max Mustermann"
+        result = _parse_new_entities(raw)
+        assert len(result) == 1
+        assert result[0]["type"] == "PERSON"
+        assert result[0]["text"] == "Max Mustermann"
+
+    def test_parse_multiple_new_lines(self):
+        from gocalma.llm_detect import _parse_new_entities
+        raw = (
+            "CONFIRMED - Alice\n"
+            "NEW - INSURANCE_NUMBER - 100 452 956\n"
+            "NEW - ADDRESS - Feldlerchenweg 15\n"
+        )
+        result = _parse_new_entities(raw)
+        assert len(result) == 2
+        types = {e["type"] for e in result}
+        assert "INSURANCE_NUMBER" in types
+        assert "ADDRESS" in types
+
+    def test_parse_no_new_lines(self):
+        from gocalma.llm_detect import _parse_new_entities
+        raw = "CONFIRMED - Alice\nFALSE_POSITIVE - Zurich - generic location"
+        result = _parse_new_entities(raw)
+        assert result == []
+
+    def test_parse_malformed_new_line_ignored(self):
+        from gocalma.llm_detect import _parse_new_entities
+        raw = "NEW - PERSON"  # missing text
+        result = _parse_new_entities(raw)
+        assert result == []
+
+    def test_parse_short_text_filtered(self):
+        from gocalma.llm_detect import _parse_new_entities
+        raw = "NEW - PERSON - X"  # single char
+        result = _parse_new_entities(raw)
+        assert result == []
+
+
+class TestDocTypeContextInPrompt:
+    def test_simple_prompt_has_doc_type_placeholder(self):
+        from gocalma.llm_detect import _VERIFY_PROMPT_SIMPLE
+        assert "{doc_type_context}" in _VERIFY_PROMPT_SIMPLE
+
+    def test_simple_prompt_formats_with_empty_context(self):
+        from gocalma.llm_detect import _VERIFY_PROMPT_SIMPLE
+        prompt = _VERIFY_PROMPT_SIMPLE.format(
+            doc_type_context="",
+            entity_list="- [PERSON] \"Alice\"",
+            context_window="Alice went to the store.",
+        )
+        assert "Alice" in prompt
+        assert "INSURANCE document" not in prompt
+
+    def test_simple_prompt_formats_with_insurance_context(self):
+        from gocalma.llm_detect import _VERIFY_PROMPT_SIMPLE, _DOC_TYPE_CONTEXT
+        context = _DOC_TYPE_CONTEXT["insurance"] + "\n"
+        prompt = _VERIFY_PROMPT_SIMPLE.format(
+            doc_type_context=context,
+            entity_list="- [PERSON] \"Alice\"",
+            context_window="Alice went to the store.",
+        )
+        assert "INSURANCE" in prompt
+
+
 class TestMergeEntityLists:
     def test_merge_deduplicates_overlapping(self):
         from gocalma.pii_detect import PIIEntity, merge_entity_lists

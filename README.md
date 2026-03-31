@@ -6,26 +6,49 @@
 [![Local AI](https://img.shields.io/badge/Local_AI-100%25_Offline-purple?style=for-the-badge)]()
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
-**Privacy-first PDF redaction with native Swiss document support, multilingual AI detection, and zero third-party data sharing.**
+**Privacy-first PDF redaction powered by a dual-pass AI pipeline: regex + multilingual BERT NER detect PII, then a local LLM verifies and catches what they missed — with hard safety rails that prevent the LLM from ever suppressing real PII.**
 
-The only redaction tool that covers AHV numbers, Zugangscodes, and Swiss IBANs natively — plus full GDPR audit trails and LLM verification that can never suppress real PII.
+---
+
+## The Dual-Pass AI Pipeline
+
+Most redaction tools run a single NER model and call it done. GoCalma runs **three detection layers** — and the third one is what makes it different.
+
+```
+Document → 35 Regex Patterns → Multilingual BERT NER → Local LLM Verification
+              (deterministic)     (7 languages)          (catches what NER missed)
+```
+
+**Layer 1 — Regex** fires 35 patterns instantly: Swiss AHV numbers, IBANs, Zugangscodes, insurance policy numbers, credit cards (Luhn-validated), and 6 label-context patterns that detect PII by surrounding keywords like "Versicherungs-Nr." and "Geburtsdatum".
+
+**Layer 2 — Multilingual BERT NER** runs chunked inference (460-token windows, unlimited document length) across 7 languages to find names, locations, organisations, and dates.
+
+**Layer 3 — Local LLM Verification** (any Ollama model) classifies the document type (insurance, medical, police, tax, government), then verifies every NER entity and discovers PII that both regex and NER missed — in a single batch call across all pages. The LLM operates under **hard safety rails**:
+
+- **Protected types** (PERSON, AHV, IBAN, SSN, credit card, DOB) — the LLM can never mark these as false positives
+- **Regex entities** — completely immune to LLM dispute (deterministic = always correct)
+- **No reason = no rejection** — the LLM must provide a reason to reject anything; without one, the entity stays
+- **Graceful degradation** — if Ollama isn't running, NER results are returned unchanged
+
+Everything runs **100% locally**. No API calls, no telemetry, no data leaves your machine.
 
 ---
 
 ## Try It
 
-**[Live Demo →](https://huggingface.co/spaces/al-allaqi/gocalma-redact)** — deployed on Hugging Face Spaces, runs in your browser with no install needed. NER + regex detection only (LLM verification requires local Ollama).
+**[Live Demo →](https://huggingface.co/spaces/al-allaqi/gocalma-redact)** — deployed on Hugging Face Spaces, runs in your browser with no install needed (NER + regex). For the full pipeline with LLM verification, run locally:
 
-Or run locally in one command via Docker (`./start.sh`) with full LLM support:
+```bash
+./start.sh    # one command — Docker handles everything
+# → http://localhost:8501
+```
 
-1. Run `./start.sh` (or `docker compose up` if Docker is installed)
-2. Open http://localhost:8501
-3. Upload any PDF with personal information
-3. See detected PII with risk severity — **Critical** / **Moderate** / **Low**
-4. Review entities, toggle off any false positives
-5. Choose redaction mode and click **Redact**
-6. Download: redacted PDF + audit log (`.json`) + encrypted key (`.gocalma`)
-7. Restore: drag all three files back in to un-redact
+1. Upload any PDF with personal information
+2. See detected PII with risk severity — **Critical** / **Moderate** / **Low**
+3. Review entities, toggle off any false positives
+4. Choose redaction mode and click **Redact**
+5. Download: redacted PDF + audit log (`.json`) + encrypted key (`.gocalma`)
+6. Restore: drag all three files back in to un-redact
 
 ![Upload and side-by-side preview](assets/readme-assets/Screenshot%202026-03-15%20at%2008.08.32.png)
 
@@ -41,13 +64,13 @@ Detects PII in English, German, French, Italian, Spanish, Portuguese, and Dutch 
 
 Built-in regex recognizers for AHV/AVS numbers (`756.XXXX.XXXX.XX`), Swiss IBANs (`CH56 0483 ...`), Zugangscodes (`ABCD-EFgh-IJKL-MNop`), CH postal codes, Swiss personal IDs, reference numbers, and insurance policy numbers — patterns that no other open-source redaction tool covers out of the box. Three regex tiers fire on every document: **24 core patterns**, **6 label-context patterns** (detect PII by surrounding keywords like "Name:", "Patient:", "Versicherungs-Nr."), and **5 health/medical patterns** (ICD-10 codes, diagnoses, medications, allergies, blood types). Credit card detection uses **Luhn checksum validation** to eliminate false positives.
 
-### LLM That Only Adds, Never Removes
+### Document-Type-Aware Detection
 
-An optional local LLM (any Ollama model — defaults to `qwen2.5:0.5b`) acts as a second pass to catch missed PII. Critically: it can never dispute a high-confidence detection. Person names, AHV numbers, IBANs, SSNs, credit cards, and dates of birth are protected types — the LLM cannot mark them as false positives under any circumstance. Regex-sourced entities are completely immune to LLM dispute. If Ollama isn't running, the LLM step is silently skipped.
+The LLM classifies each document (insurance, medical, police, tax, government) and injects domain-specific instructions into the verification prompt — so an insurance letter gets extra scrutiny for policy numbers and an incident report gets extra scrutiny for case numbers and witness names.
 
 ---
 
-## Detection Pipeline
+## Detection Pipeline (detailed)
 
 ### Layer 1 — Regex (instant, deterministic)
 

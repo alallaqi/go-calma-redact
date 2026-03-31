@@ -1,15 +1,15 @@
-"""LLM-based PII verification via Ollama (qwen2.5:0.5b).
+"""LLM-based PII verification using Qwen2.5-0.5B-Instruct (HuggingFace).
 
-Connects to the local Ollama daemon at http://localhost:11434.
-If unavailable, all functions silently return original entities unchanged.
+Runs fully in-process — no external daemon required.
+If the model weights are not cached, all functions return original entities unchanged.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
+import threading
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -17,69 +17,67 @@ _log = logging.getLogger(__name__)
 from gocalma.pii_detect import PIIEntity
 
 # ---------------------------------------------------------------------------
-# Ollama configuration
+# Model configuration
 # ---------------------------------------------------------------------------
 
-_OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-_OLLAMA_TIMEOUT = 2  # seconds for connectivity check
-
-# Currently selected Ollama model
-_active_llm_model: str = "qwen2.5:0.5b"
+_HF_LLM_MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
+_hf_pipe: Any = None
+_hf_pipe_lock = threading.Lock()
 
 # Module-level availability flag — set once at import time.
 LLM_AVAILABLE: bool = False
-_OLLAMA_MODELS: list[str] = []  # populated by _check_ollama
 
 
-def _check_ollama() -> bool:
-    """Return True if Ollama is reachable and has at least one model pulled."""
-    global _OLLAMA_MODELS
+def _check_hf_llm() -> bool:
+    """Return True if the model weights are cached locally."""
     try:
-        import urllib.request
-        req = urllib.request.Request(f"{_OLLAMA_BASE_URL}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=_OLLAMA_TIMEOUT) as resp:
-            data = json.loads(resp.read())
-        _OLLAMA_MODELS = [m["name"] for m in data.get("models", []) if m.get("name")]
-        if not _OLLAMA_MODELS:
-            _log.info("Ollama running but no models pulled")
-            return False
-        # Check if the active model is available
-        base_name = _active_llm_model.split(":")[0]
-        for m in _OLLAMA_MODELS:
-            if m.split(":")[0] == base_name:
-                return True
-        # Active model not found, but others are — still available
-        _log.info("Active model %r not pulled, but %d other model(s) available",
-                   _active_llm_model, len(_OLLAMA_MODELS))
-        return True
-    except Exception as exc:
-        _log.debug("Ollama not available: %s", exc)
+        from huggingface_hub import try_to_load_from_cache, _CACHED_NO_EXIST
+        result = try_to_load_from_cache(_HF_LLM_MODEL, "config.json")
+        return result not in (None, _CACHED_NO_EXIST)
+    except Exception:
         return False
 
 
+def _get_hf_pipe():
+    """Lazily load and cache the text-generation pipeline (loaded once per process)."""
+    global _hf_pipe
+    if _hf_pipe is not None:
+        return _hf_pipe
+    with _hf_pipe_lock:
+        if _hf_pipe is not None:
+            return _hf_pipe
+        from transformers import pipeline
+        _hf_pipe = pipeline(
+            "text-generation",
+            model=_HF_LLM_MODEL,
+            torch_dtype="auto",
+            device_map="cpu",
+        )
+    return _hf_pipe
+
+
+def _call_llm(messages: list[dict]) -> str:
+    """Run inference and return the assistant reply text."""
+    pipe = _get_hf_pipe()
+    result = pipe(messages, max_new_tokens=512, do_sample=False, return_full_text=False)
+    generated = result[0].get("generated_text", "")
+    if isinstance(generated, list):
+        return generated[-1].get("content", "")
+    return str(generated)
+
+
 # Check on module load
-LLM_AVAILABLE = _check_ollama()
+LLM_AVAILABLE = _check_hf_llm()
 
 
 def is_available() -> bool:
-    """Return True if the LLM backend (Ollama) is ready."""
+    """Return True if the LLM is ready."""
     return LLM_AVAILABLE
 
 
-def list_ollama_models() -> list[str]:
-    """Return the list of Ollama models discovered at startup."""
-    return list(_OLLAMA_MODELS)
-
-
 def get_llm_model() -> str:
-    """Return the currently active LLM model name."""
-    return _active_llm_model
-
-
-def set_llm_model(model_name: str) -> None:
-    """Set the active LLM model used for verification and classification."""
-    global _active_llm_model
-    _active_llm_model = model_name
+    """Return the active LLM model name."""
+    return _HF_LLM_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +337,6 @@ _VERIFY_PROMPT = _build_verify_prompt("general")
 # Ollama call
 # ---------------------------------------------------------------------------
 
-def _call_ollama(messages: list[dict]) -> str:
-    """Send *messages* to the local Ollama daemon and return the reply text."""
-    import ollama as _ollama
-    resp = _ollama.chat(model=_active_llm_model, messages=messages)
-    return resp["message"]["content"]
-
-
 # ---------------------------------------------------------------------------
 # JSON parsing helpers
 # ---------------------------------------------------------------------------
@@ -441,7 +432,7 @@ def classify_document(pages: list) -> str:
     )
 
     try:
-        raw = _call_ollama([{"role": "user", "content": prompt}])
+        raw = _call_llm([{"role": "user", "content": prompt}])
     except Exception as exc:
         _log.warning("Document classification failed (defaulting to 'general'): %s", exc)
         return "general"
@@ -526,6 +517,7 @@ You are a privacy compliance assistant. Your job is to verify whether \
 detected text spans are genuine personal data (PII) that should be \
 redacted before sharing this document.
 
+{doc_type_context}\
 IMPORTANT RULES:
 - Default to CONFIRMED. Only mark something as FALSE_POSITIVE if you \
 are highly certain it is not personal data.
@@ -546,6 +538,14 @@ Only respond FALSE_POSITIVE for things like:
   - A company name that is clearly a brand, not a person
   - A generic location used in a product description (not an address)
   - An abbreviation code (GIC, AIC, etc.)
+
+After verifying the entities above, list any ADDITIONAL PII you find \
+in the document that was not already detected. For each, write:
+  NEW - <type> - <exact text from document>
+
+Valid types: PERSON, EMAIL_ADDRESS, PHONE_NUMBER, ADDRESS, LOCATION, \
+DATE_TIME, IBAN_CODE, CREDIT_CARD, IP_ADDRESS, CH_AHV, CH_ACCESS_CODE, \
+CH_ID_NUMBER, INSURANCE_NUMBER, ID_NUMBER, PASSPORT.
 
 Entities to verify:
 {entity_list}
@@ -578,6 +578,27 @@ def _parse_simple_verdicts(raw: str) -> dict[str, tuple[str, str | None]]:
             if ent_text:
                 verdicts[ent_text.strip().lower()] = ("false_positive", reason)
     return verdicts
+
+
+def _parse_new_entities(raw: str) -> list[dict]:
+    """Parse NEW entity lines from the LLM output.
+
+    Expected format: ``NEW - <type> - <exact text>``
+    Returns a list of dicts with keys: type, text.
+    """
+    new_entities: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.upper().startswith("NEW"):
+            continue
+        parts = line.split("-", 2)
+        if len(parts) < 3:
+            continue
+        ent_type = parts[1].strip().upper()
+        ent_text = parts[2].strip()
+        if ent_text and len(ent_text) >= 2:
+            new_entities.append({"type": ent_type, "text": ent_text})
+    return new_entities
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +648,12 @@ def verify_entities(
         entity_lines.append(f"- [{ent.entity_type}] \"{ent.text}\"")
     entity_list_str = "\n".join(entity_lines)
 
+    context = _DOC_TYPE_CONTEXT.get(doc_type, "")
+    if context:
+        context += "\n"
+
     prompt = _VERIFY_PROMPT_SIMPLE.format(
+        doc_type_context=context,
         entity_list=entity_list_str,
         context_window=truncated,
     )
@@ -638,7 +664,7 @@ def verify_entities(
     ]
 
     try:
-        assistant_text = _call_ollama(messages)
+        assistant_text = _call_llm(messages)
     except Exception as exc:
         _log.warning("LLM verification failed (returning NER-only results): %s", exc)
         return (entities, False)
@@ -780,7 +806,13 @@ def verify_entities_batch(
         entity_lines.append(f"- [p{ent.page_num + 1}] [{ent.entity_type}] \"{ent.text}\"")
     entity_list_str = "\n".join(entity_lines)
 
+    # Inject document-type context into the prompt
+    context = _DOC_TYPE_CONTEXT.get(doc_type, "")
+    if context:
+        context += "\n"
+
     prompt = _VERIFY_PROMPT_SIMPLE.format(
+        doc_type_context=context,
         entity_list=entity_list_str,
         context_window=combined_text,
     )
@@ -791,7 +823,7 @@ def verify_entities_batch(
     ]
 
     try:
-        assistant_text = _call_ollama(messages)
+        assistant_text = _call_llm(messages)
     except Exception as exc:
         _log.warning("Batch LLM verification failed: %s", exc)
         return (entities, False)
@@ -816,6 +848,42 @@ def verify_entities_batch(
         else:
             ent.analysis = "LLM verified"
         output.append(ent)
+
+    # Discover additional entities the LLM found
+    new_raw = _parse_new_entities(assistant_text)
+    existing_texts = {e.text.strip().lower() for e in output}
+    for item in new_raw:
+        ent_text = item["text"]
+        if ent_text.strip().lower() in existing_texts:
+            continue
+        # Verify the text actually appears in the document
+        actual_start = _find_best_occurrence(combined_text, ent_text, 0)
+        if actual_start == -1:
+            continue
+
+        ent_type = item["type"]
+        if ent_type in {"LOCATION", "ADDRESS"} and is_generic_street_name(ent_text):
+            _log.debug("Filtered generic street name from batch LLM: %r", ent_text)
+            continue
+
+        # Determine which page this entity belongs to
+        page_num = 0
+        for p in pages:
+            if ent_text in (p.text or ""):
+                page_num = p.page_num
+                break
+
+        output.append(PIIEntity(
+            entity_type=ent_type,
+            text=ent_text,
+            start=actual_start,
+            end=actual_start + len(ent_text),
+            score=0.3,
+            page_num=page_num,
+            source="LLM",
+            analysis="Found by LLM only",
+        ))
+        existing_texts.add(ent_text.strip().lower())
 
     output.sort(key=lambda e: (e.page_num, e.start))
     return (output, True)

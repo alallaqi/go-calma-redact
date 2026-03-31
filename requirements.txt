@@ -1,42 +1,26 @@
-# Core (Python 3.9+)
+# GoCalma — Python 3.9+
+
+# UI
 streamlit>=1.30.0,<2.0
+
+# PDF parsing and rendering
 pymupdf>=1.23.0,<2.0
-presidio-analyzer>=2.2.0,<3.0
-presidio-anonymizer>=2.2.0,<3.0
-spacy>=3.7.0,<4.0
-# spaCy models — install after pip install -r requirements.txt:
-#   python -m spacy download en_core_web_lg   (default NER model, English)
-#   python -m spacy download en_core_web_sm   (tokeniser for HuggingFace NER models)
-#   python -m spacy download de_core_news_lg  (German NER — recommended for Swiss documents)
-#   python -m spacy download xx_ent_wiki_sm   (multilingual DE/FR/IT/EN NER)
-#
-# OCR language packs (required for German/French/Italian scanned documents):
-#   brew install tesseract tesseract-lang
+
+# Encryption (audit log, redacted PDF protection)
 cryptography>=42.0.0,<45.0
-pytesseract>=0.3.10,<1.0
-pdf2image>=1.16.0,<2.0
+
+# Image processing (used by Surya OCR renderer)
 Pillow>=10.0.0,<11.0
 
-# OCR engines
-# Surya (recommended — transformer-based, language-agnostic, pure pip)
-surya-ocr>=0.4.0,<0.5       # transformer-based OCR, language-agnostic
-# Tesseract fallback (requires system binary):
-#   brew install tesseract tesseract-lang   (macOS)
-#   sudo apt-get install tesseract-ocr tesseract-ocr-deu tesseract-ocr-fra tesseract-ocr-ita
+# OCR — transformer-based, language-agnostic, no system binary needed
+surya-ocr>=0.4.0,<0.5
 
-# Optional NER backends (install the ones you need)
-flair>=0.13.0,<1.0
-stanza>=1.8.0,<2.0
-transformers>=4.37.0,<5.0  # 4.37+ required for Qwen2 / Qwen2.5 Hub models
+# NER model + LLM inference (BERT + Qwen2.5-0.5B-Instruct)
+transformers>=4.37.0,<5.0
 torch>=2.1.0,<3.0
-# Required by Presidio's HuggingFace/transformers NLP engine
-spacy-huggingface-pipelines>=0.0.1,<1.0
-
-# Optional: local LLM verification (HuggingFace models — Mistral-7B, Phi-3.5-mini, Qwen2.5)
 huggingface_hub>=0.20.0,<1.0
-accelerate>=1.0.0,<2.0
-sentencepiece>=0.2.0,<1.0
-protobuf>=4.0.0,<7.0
 
-# Optional: Ollama backend (fastest — requires `brew install ollama` + `ollama serve`)
-ollama>=0.2.0,<1.0
+# Optional: Tesseract fallback OCR
+# Requires system binary: brew install tesseract tesseract-lang  (macOS)
+#                         apt-get install tesseract-ocr tesseract-ocr-deu ...  (Linux)
+# pytesseract>=0.3.10,<1.0

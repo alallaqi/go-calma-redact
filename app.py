@@ -44,7 +44,7 @@ from gocalma.llm_detect import (
     verify_entities as llm_verify_entities,
     verify_entities_batch as llm_verify_entities_batch,
     classify_document,
-    list_ollama_models, get_llm_model, set_llm_model,
+    get_llm_model,
 )
 from gocalma.summariser import build_summary
 from gocalma.audit import create_audit, audit_to_bytes
@@ -265,31 +265,13 @@ with st.sidebar:
             set_ner_model(selected_ner)
 
         st.divider()
-        st.markdown("**LLM model** *(Ollama)*")
+        st.markdown("**LLM model**")
         if is_llm_available():
-            ollama_models = list_ollama_models()
-            current_llm = get_llm_model()
-            if ollama_models:
-                llm_idx = (
-                    ollama_models.index(current_llm)
-                    if current_llm in ollama_models
-                    else 0
-                )
-                selected_llm = st.selectbox(
-                    "LLM model",
-                    options=ollama_models,
-                    index=llm_idx,
-                    key="llm_model_advanced",
-                    label_visibility="collapsed",
-                )
-                if selected_llm != current_llm:
-                    set_llm_model(selected_llm)
-            else:
-                st.info(f"Using **{current_llm}**")
+            st.info(f"Using **{get_llm_model()}**")
         else:
             st.warning(
-                "Ollama not running or no models pulled.\n\n"
-                "```\nbrew install ollama\nollama serve\nollama pull qwen2.5:0.5b\n```"
+                "LLM model not cached. Run the app once with internet access "
+                "to download **Qwen2.5-0.5B-Instruct** (~1 GB)."
             )
 
 
